@@ -1,5 +1,5 @@
 // Axel '0vercl0k' Souchet - May 30 2024
-use std::cmp::min;
+// use std::cmp::min;
 use std::env::temp_dir;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, Write};
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use addr_symbolizer::{AddrSpace, Builder, Module, PdbId};
 use object::read::pe::PeFile64;
 use object::{NativeEndian, ReadCache, ReadRef};
-use udmp_parser::UserDumpParser;
+// use udmp_parser::UserDumpParser;
 
 const EXPECTED_LEN: u64 = 0x90_00;
 const EXPECTED_RAW: [(u64, &str, &str); 4] = [

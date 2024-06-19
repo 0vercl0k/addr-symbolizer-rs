@@ -83,4 +83,4 @@ jobs:
           path: |
             target/release/examples/symbolize-dump.exe
             target/release/examples/symbolize_dump.pdb
-            target/release/symbolize-dump
+            target/release/examples/symbolize-dump
