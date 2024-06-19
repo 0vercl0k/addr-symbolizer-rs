@@ -1,5 +1,5 @@
 // Axel '0vercl0k' Souchet - May 30 2024
-use std::{io, ops::Add};
+use std::io;
 
 pub trait AddrSpace {
     fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize>;
@@ -35,7 +35,10 @@ pub trait AddrSpace {
     }
 }
 
-impl<T> AddrSpace for Box<T> where T: AddrSpace + ?Sized {
+impl<T> AddrSpace for Box<T>
+where
+    T: AddrSpace + ?Sized,
+{
     fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
         T::read_at(self, addr, buf)
     }

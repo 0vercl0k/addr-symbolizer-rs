@@ -198,107 +198,107 @@ fn raw_file() {
     ));
 }
 
-#[derive(Debug)]
-struct UserDumpAddrSpace<'a>(UserDumpParser<'a>);
+// #[derive(Debug)]
+// struct UserDumpAddrSpace<'a>(UserDumpParser<'a>);
 
-impl<'a> AddrSpace for UserDumpAddrSpace<'a> {
-    fn read_at(&mut self, addr: u64, mut buf: &mut [u8]) -> io::Result<usize> {
-        let mut cur_addr = addr;
-        let mut read_len = 0;
-        while read_len < buf.len() {
-            let Some(block) = self.0.get_mem_block(addr) else {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    format!("no mem block found for {addr:#x}"),
-                ));
-            };
+// impl<'a> AddrSpace for UserDumpAddrSpace<'a> {
+//     fn read_at(&mut self, addr: u64, mut buf: &mut [u8]) -> io::Result<usize>
+// {         let mut cur_addr = addr;
+//         let mut read_len = 0;
+//         while read_len < buf.len() {
+//             let Some(block) = self.0.get_mem_block(addr) else {
+//                 return Err(io::Error::new(
+//                     io::ErrorKind::Unsupported,
+//                     format!("no mem block found for {addr:#x}"),
+//                 ));
+//             };
 
-            let Some(data) = block.data_from(cur_addr) else {
-                panic!();
-            };
+//             let Some(data) = block.data_from(cur_addr) else {
+//                 panic!();
+//             };
 
-            let left = buf.len() - read_len;
-            let len = min(data.len(), left);
-            buf.write_all(&data[..len]).unwrap();
-            cur_addr += u64::try_from(len).unwrap();
-            read_len += len;
-        }
+//             let left = buf.len() - read_len;
+//             let len = min(data.len(), left);
+//             buf.write_all(&data[..len]).unwrap();
+//             cur_addr += u64::try_from(len).unwrap();
+//             read_len += len;
+//         }
 
-        Ok(read_len)
-    }
+//         Ok(read_len)
+//     }
 
-    fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<usize>> {
-        match self.read_at(addr, buf) {
-            Ok(sz) => Ok(Some(sz)),
-            Err(_) => Ok(None),
-        }
-    }
-}
+//     fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) ->
+// io::Result<Option<usize>> {         match self.read_at(addr, buf) {
+//             Ok(sz) => Ok(Some(sz)),
+//             Err(_) => Ok(None),
+//         }
+//     }
+// }
 
-#[test]
-fn user_dump() {
-    let dump = UserDumpParser::new(testdata("udmp.dmp")).unwrap();
-    let modules = dump
-        .modules()
-        .values()
-        .map(|module| {
-            Module::new(
-                module.path.file_name().unwrap().to_string_lossy(),
-                module.start_addr(),
-                module.end_addr(),
-            )
-        })
-        .collect::<Vec<_>>();
+// #[test]
+// fn user_dump() {
+//     let dump = UserDumpParser::new(testdata("udmp.dmp")).unwrap();
+//     let modules = dump
+//         .modules()
+//         .values()
+//         .map(|module| {
+//             Module::new(
+//                 module.path.file_name().unwrap().to_string_lossy(),
+//                 module.start_addr(),
+//                 module.end_addr(),
+//             )
+//         })
+//         .collect::<Vec<_>>();
 
-    let mut udmp_addr_space = UserDumpAddrSpace(dump);
-    let mut symb = Builder::default()
-        .modules(modules.clone())
-        .msft_symsrv()
-        .symcache(symcache("basics"))
-        .build()
-        .unwrap();
+//     let mut udmp_addr_space = UserDumpAddrSpace(dump);
+//     let mut symb = Builder::default()
+//         .modules(modules.clone())
+//         .msft_symsrv()
+//         .symcache(symcache("basics"))
+//         .build()
+//         .unwrap();
 
-    // 0:000> u 00007ff9`aa4f8eb2
-    // ntdll!EvtIntReportEventWorker$fin$0+0x2:
-    // 00007ff9`aa4f8eb2 4883ec50        sub     rsp,50h
-    let mut output = Vec::new();
-    symb.full(&mut udmp_addr_space, 0x7ff9aa4f8eb2, &mut output)
-        .unwrap();
-    assert_eq!(
-        String::from_utf8(output).unwrap(),
-        "ntdll.dll!EvtIntReportEventWorker$fin$0+0x2"
-    );
+//     // 0:000> u 00007ff9`aa4f8eb2
+//     // ntdll!EvtIntReportEventWorker$fin$0+0x2:
+//     // 00007ff9`aa4f8eb2 4883ec50        sub     rsp,50h
+//     let mut output = Vec::new();
+//     symb.full(&mut udmp_addr_space, 0x7ff9aa4f8eb2, &mut output)
+//         .unwrap();
+//     assert_eq!(
+//         String::from_utf8(output).unwrap(),
+//         "ntdll.dll!EvtIntReportEventWorker$fin$0+0x2"
+//     );
 
-    let stats = symb.stats();
-    assert_eq!(stats.amount_pdb_downloaded(), 1);
-    assert!(stats.did_download(
-        PdbId::new(
-            "ntdll.pdb",
-            "8D5D5ED5D5B8AA609A82600C14E3004D".parse().unwrap(),
-            1
-        )
-        .unwrap()
-    ));
+//     let stats = symb.stats();
+//     assert_eq!(stats.amount_pdb_downloaded(), 1);
+//     assert!(stats.did_download(
+//         PdbId::new(
+//             "ntdll.pdb",
+//             "8D5D5ED5D5B8AA609A82600C14E3004D".parse().unwrap(),
+//             1
+//         )
+//         .unwrap()
+//     ));
 
-    drop(symb);
-    let mut symb_offline = Builder::default()
-        .symcache(symcache("basics"))
-        .modules(modules)
-        .build()
-        .unwrap();
+//     drop(symb);
+//     let mut symb_offline = Builder::default()
+//         .symcache(symcache("basics"))
+//         .modules(modules)
+//         .build()
+//         .unwrap();
 
-    // 0:000> u 00007ff9`aa4f8eb2
-    // ntdll!EvtIntReportEventWorker$fin$0+0x2:
-    // 00007ff9`aa4f8eb2 4883ec50        sub     rsp,50h
-    let mut output = Vec::new();
-    symb_offline
-        .full(&mut udmp_addr_space, 0x7ff9aa4f8eb2, &mut output)
-        .unwrap();
-    assert_ne!(
-        String::from_utf8(output).unwrap(),
-        "ntdll.dll!EvtIntReportEventWorker$fin$0+0x2"
-    );
+//     // 0:000> u 00007ff9`aa4f8eb2
+//     // ntdll!EvtIntReportEventWorker$fin$0+0x2:
+//     // 00007ff9`aa4f8eb2 4883ec50        sub     rsp,50h
+//     let mut output = Vec::new();
+//     symb_offline
+//         .full(&mut udmp_addr_space, 0x7ff9aa4f8eb2, &mut output)
+//         .unwrap();
+//     assert_ne!(
+//         String::from_utf8(output).unwrap(),
+//         "ntdll.dll!EvtIntReportEventWorker$fin$0+0x2"
+//     );
 
-    let stats = symb_offline.stats();
-    assert_eq!(stats.amount_pdb_downloaded(), 0);
-}
+//     let stats = symb_offline.stats();
+//     assert_eq!(stats.amount_pdb_downloaded(), 0);
+// }

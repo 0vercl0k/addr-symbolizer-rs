@@ -7,7 +7,7 @@ include = ["/Cargo.toml", "/LICENSE", "/src/**", "README.md"]
 authors = ["Axel '0vercl0k' Souchet"]
 license = "MIT"
 rust-version = "1.70"
-repository = "https://github.com/0vercl0k/symbolizer-rs"
+repository = "https://github.com/0vercl0k/addr-symbolizer-rs"
 keywords = ["windows", "kernel", "crash-dump", "symbols", "pdb"]
 edition = "2021"
 
