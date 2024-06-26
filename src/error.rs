@@ -28,9 +28,9 @@ pub enum Error {
     PdbPathNoName(PathBuf),
     #[error("failed to perform an i/o: {0}")]
     Io(#[from] io::Error),
-    #[error("failed to download pdb {pdb_url}: {e}")]
-    DownloadPdb {
-        pdb_url: String,
+    #[error("failed to download PE/PDB {entry_url}: {e}")]
+    Download {
+        entry_url: String,
         e: Box<ureq::Error>,
     },
     #[error("the module path is either 0 or larger than reasonable")]

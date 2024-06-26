@@ -189,6 +189,12 @@ pub const IMAGE_DIRECTORY_ENTRY_DEBUG: usize = 6;
 
 pub const IMAGE_DEBUG_TYPE_CODEVIEW: u32 = 2;
 
+pub trait SymcacheEntry {
+    fn name(&self) -> &str;
+
+    fn index(&self) -> String;
+}
+
 /// A PDB identifier.
 ///
 /// To download a PDB off Microsoft's Symbol Server, we need three pieces of
@@ -196,32 +202,85 @@ pub const IMAGE_DEBUG_TYPE_CODEVIEW: u32 = 2;
 #[derive(Debug, Default, PartialEq, Eq, Hash, Clone)]
 pub struct PdbId {
     pub path: PathBuf,
+    pub name: String,
     pub guid: Guid,
     pub age: u32,
 }
 
+impl SymcacheEntry for PdbId {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn index(&self) -> String {
+        // It seems that Chrome's symsrv server only accepts the GUID/age part as
+        // uppercase hex, so let's use that.
+        format!("{}{:x}", self.guid, self.age)
+    }
+}
+
 impl Display for PdbId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("{:?}:{}:{:x}", self.path, self.guid, self.age))
+        f.write_fmt(format_args!("{}:{}:{:x}", self.name, self.guid, self.age))
     }
 }
 
 impl PdbId {
     pub fn new(path: impl Into<PathBuf>, guid: Guid, age: u32) -> Result<Self> {
         let path = path.into();
-        if path.file_name().is_none() {
-            return Err(E::PdbPathNoName(path));
-        }
+        let Some(name) = path.file_name() else {
+            return Err(E::PdbPathNoName(path.to_path_buf()));
+        };
 
-        Ok(Self { path, guid, age })
+        let name = name.to_string_lossy().to_string();
+
+        Ok(Self {
+            path,
+            name,
+            guid,
+            age,
+        })
+    }
+}
+
+/// A PE identifier.
+///
+/// The identifier can be used to locate a PE on a symbol server when a
+/// [`PdbId`] isn't present (because for example the debug directory isn't
+/// present in the address space).
+#[derive(Debug, Default, PartialEq, Eq, Hash, Clone)]
+pub struct PeId<'s> {
+    pub name: &'s str,
+    pub timestamp: u32,
+    pub size: u32,
+}
+
+impl<'s> SymcacheEntry for PeId<'s> {
+    fn name(&self) -> &str {
+        self.name
     }
 
-    pub fn name(&self) -> String {
-        self.path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned()
+    fn index(&self) -> String {
+        format!("{:X}{:X}", self.timestamp, self.size)
+    }
+}
+
+impl<'s> PeId<'s> {
+    pub fn new(name: &'s str, timestamp: u32, size: u32) -> Self {
+        Self {
+            name,
+            timestamp,
+            size,
+        }
+    }
+}
+
+impl<'s> Display for PeId<'s> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "{:?}:{:#x}:{:#x}",
+            self.name, self.timestamp, self.size
+        ))
     }
 }
 
@@ -299,6 +358,8 @@ where
 /// We are only interested in the PDB identifier and the Export Address Table.
 #[derive(Debug, Default)]
 pub struct Pe {
+    pub size: u32,
+    pub timestamp: u32,
     pub pdb_id: Option<PdbId>,
     pub exports: Vec<(Rva, String)>,
 }
@@ -354,7 +415,15 @@ impl Pe {
         }
         .unwrap_or_default();
 
-        Ok(Self { pdb_id, exports })
+        let timestamp = nt_hdr.file_hdr.time_date_stamp;
+        let size = opt_hdr.size_of_image;
+
+        Ok(Self {
+            size,
+            timestamp,
+            pdb_id,
+            exports,
+        })
     }
 
     fn try_parse_debug_dir(

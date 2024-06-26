@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::{hash_map, HashMap};
 use std::fs::{self, File};
 use std::hash::{BuildHasher, Hasher};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Seek, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -18,81 +18,80 @@ use crate::builder::{Builder, NoSymcache};
 use crate::misc::{fast_hex32, fast_hex64};
 use crate::modules::{Module, Modules};
 use crate::pdbcache::{PdbCache, PdbCacheBuilder};
-use crate::pe::{PdbId, Pe};
+use crate::pe::{PdbId, Pe, PeId, SymcacheEntry};
 use crate::stats::{Stats, StatsBuilder};
 use crate::{Error as E, Result};
 
-/// Format a path to find a PDB in a symbol cache.
+/// Format a symbol cache path for a PE/PDB.
 ///
-/// Here is an example:
+/// Here is an example for a PE:
+/// ```text
+/// C:\work\dbg\sym\hal.dll\4252FF428c000\hal.dll
+/// ^^^^^^^^^^^^^^^ ^^^^^^^ ^^^^^^^^^^^^^ ^^^^^^^
+///   cache path    PE name Timestamp Size PE name
+/// ```
+///
+/// Here is an example for a PDB:
 /// ```text
 /// C:\work\dbg\sym\ntfs.pdb\64D20DCBA29FFC0CD355FFE7440EC5F81\ntfs.pdb
 /// ^^^^^^^^^^^^^^^ ^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ^^^^^^^^
 ///   cache path    PDB name PDB GUID & PDB Age                PDB name
 /// ```
-pub fn format_pdb_path(symsrv_cache: &Path, pdb_id: &PdbId) -> PathBuf {
-    let pdb_name = pdb_id.name();
+pub fn format_symcache_path(symsrv_cache: &Path, entry: &impl SymcacheEntry) -> PathBuf {
     symsrv_cache
-        .join(&pdb_name)
-        .join(format!("{}{:x}", pdb_id.guid, pdb_id.age,))
-        .join(&pdb_name)
+        .join(entry.name())
+        .join(entry.index())
+        .join(entry.name())
 }
 
-/// Format a URL to find a PDB on an HTTP symbol server.
-pub fn format_pdb_url(symsrv: &str, pdb_id: &PdbId) -> String {
-    // It seems that Chrome's symsrv server only accepts the GUID/age part as
-    // uppercase hex, so let's use that.
+/// Format a URL to find a PE/PDB on an HTTP symbol server.
+pub fn format_symsrv_url(symsrv: &str, entry: &impl SymcacheEntry) -> String {
     format!(
-        "{symsrv}/{}/{}{:x}/{}",
-        pdb_id.name(),
-        pdb_id.guid,
-        pdb_id.age,
-        pdb_id.name()
+        "{symsrv}/{}/{}/{}",
+        entry.name(),
+        entry.index(),
+        entry.name()
     )
 }
 
-/// Download a PDB file from a candidate symbol servers.
+/// Attempt to download a PE/PDB file from a list of symbol servers.
 ///
 /// The code iterates through every symbol servers, and stops as soon as it was
 /// able to download a matching file.
-pub fn try_download_from_guid(
+pub fn download_from_symsrv(
     symsrvs: &Vec<String>,
     sympath_dir: impl AsRef<Path>,
-    pdb_id: &PdbId,
+    entry: &impl SymcacheEntry,
 ) -> Result<Option<PathBuf>> {
     // Give a try to each of the symbol servers.
     for symsrv in symsrvs {
-        debug!(
-            "trying to download pdb for {} from {}..",
-            pdb_id.name(),
-            symsrv
-        );
-
         // The way a symbol path is structured is that there is a directory per module..
         let sympath_dir = sympath_dir.as_ref();
-        let pdb_root_dir = sympath_dir.join(pdb_id.name());
+        let entry_root_dir = sympath_dir.join(entry.name());
 
-        // ..and inside, there is a directory per version of the PDB..
-        let pdb_dir = pdb_root_dir.join(format!("{}{:x}", pdb_id.guid, pdb_id.age));
+        // ..and inside, there is a directory per version of the PE/PDB..
+        let entry_dir = entry_root_dir.join(entry.index());
 
-        // ..and finally the PDB file itself.
-        let pdb_path = pdb_dir.join(pdb_id.name());
+        // ..and finally the PE/PDB file itself.
+        let entry_path = entry_dir.join(entry.name());
 
         // The file doesn't exist on the file system, so let's try to download it from a
         // symbol server.
-        let pdb_url = format_pdb_url(symsrv, pdb_id);
-        let resp = match ureq::get(&pdb_url).call() {
+        let entry_url = format_symsrv_url(symsrv, entry);
+        debug!("trying to download {entry_url}..");
+
+        let resp = match ureq::get(&entry_url).call() {
             Ok(o) => o,
             // If we get a 404, it means that the server doesn't know about this file. So we'll skip
             // to the next symbol server.
             Err(ureq::Error::Status(404, ..)) => {
-                warn!("got a 404 for {pdb_url}");
+                warn!("got a 404 for {entry_url}");
                 continue;
             }
             // If we received any other errors, well that's not expected so let's bail.
             Err(e) => {
-                return Err(E::DownloadPdb {
-                    pdb_url,
+                return Err(E::Download {
+                    entry_url,
                     e: e.into(),
                 });
             }
@@ -100,26 +99,26 @@ pub fn try_download_from_guid(
 
         // If the server knows about this file, it is time to create the directory
         // structure in which we'll download the file into.
-        if !(pdb_root_dir.try_exists()?) {
-            debug!("creating {pdb_root_dir:?}..");
-            fs::create_dir(&pdb_root_dir)
-                .with_context(|| format!("failed to create base pdb dir {pdb_root_dir:?}"))?;
+        if !entry_root_dir.try_exists()? {
+            debug!("creating {entry_root_dir:?}..");
+            fs::create_dir(&entry_root_dir)
+                .with_context(|| format!("failed to create base PE/PDB dir {entry_root_dir:?}"))?;
         }
 
-        if !pdb_dir.try_exists()? {
-            debug!("creating {pdb_dir:?}..");
-            fs::create_dir(&pdb_dir)
-                .with_context(|| format!("failed to create pdb dir {pdb_dir:?}"))?;
+        if !entry_dir.try_exists()? {
+            debug!("creating {entry_dir:?}..");
+            fs::create_dir(&entry_dir)
+                .with_context(|| format!("failed to create pdb dir {entry_dir:?}"))?;
         }
 
         // Finally, we can download and save the file.
-        let file =
-            File::create(&pdb_path).with_context(|| format!("failed to create {pdb_path:?}"))?;
+        let file = File::create(&entry_path)
+            .with_context(|| format!("failed to create {entry_path:?}"))?;
 
         io::copy(&mut resp.into_reader(), &mut BufWriter::new(file))?;
 
-        debug!("downloaded to {pdb_path:?}");
-        return Ok(Some(pdb_path));
+        debug!("downloaded to {entry_path:?}");
+        return Ok(Some(entry_path));
     }
 
     Ok(None)
@@ -139,6 +138,57 @@ enum PdbKind {
     Download,
 }
 
+struct FileAddrSpace(File);
+
+impl FileAddrSpace {
+    fn new(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self(File::open(path.as_ref())?))
+    }
+}
+
+impl AddrSpace for FileAddrSpace {
+    fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.seek(io::SeekFrom::Start(addr))?;
+
+        self.0.read(buf)
+    }
+
+    fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<usize>> {
+        self.read_at(addr, buf).map(Some)
+    }
+}
+
+/// Try to download a PE file off the symbol servers, and if one is found, try
+/// to extract its PDB identifier.
+fn get_pdb_id_from_symsrvs(
+    sympath: &Path,
+    symsrvs: &Vec<String>,
+    pe_id: &PeId,
+    offline: bool,
+) -> Result<Option<PdbId>> {
+    if offline {
+        return Ok(None);
+    }
+
+    let mut pe_path = format_symcache_path(sympath, pe_id);
+    if !pe_path.exists() {
+        // We didn't find a PE on disk, so last resort is to try to download it.
+        let Some(downloaded) = download_from_symsrv(symsrvs, sympath, pe_id)? else {
+            debug!("did not find {pe_id} on any symbol server");
+            return Ok(None);
+        };
+
+        pe_path = downloaded;
+    }
+
+    debug!("trying to parse {pe_path:?} from disk..");
+    let pe_file = Pe::new(&mut FileAddrSpace::new(pe_path)?, 0)?;
+
+    debug!("PDB id parsed from the PE: {:?}", pe_file.pdb_id);
+
+    Ok(pe_file.pdb_id)
+}
+
 /// Try to find a PDB file online or locally from a [`PdbId`].
 fn get_pdb(
     sympath: &Path,
@@ -153,7 +203,7 @@ fn get_pdb(
     }
 
     // Now, let's see if it's in the local cache..
-    let local_path = format_pdb_path(sympath, pdb_id);
+    let local_path = format_symcache_path(sympath, pdb_id);
     if local_path.is_file() {
         // .. if it does, this is a 'LocalCache' PDB.
         return Ok(Some((local_path, PdbKind::LocalCache)));
@@ -165,7 +215,7 @@ fn get_pdb(
     }
 
     // We didn't find a PDB on disk, so last resort is to try to download it.
-    let downloaded_path = try_download_from_guid(symsrvs, sympath, pdb_id)?;
+    let downloaded_path = download_from_symsrv(symsrvs, sympath, pdb_id)?;
 
     Ok(downloaded_path.map(|p| (p, PdbKind::Download)))
 }
@@ -336,11 +386,21 @@ impl Symbolizer {
         // there's any.
         let pe = Pe::new(addr_space, module.at.start)?;
 
+        // .. and see if it has PDB information. If it doesn't try to download the
+        // original PE file off symbol servers.
+        let pdb_id = if pe.pdb_id.is_none() {
+            let pe_id = PeId::new(&module.name, pe.timestamp, pe.size);
+            trace!("No PDB information found, trying to download PE file for {pe_id}..");
+
+            get_pdb_id_from_symsrvs(&self.symcache, &self.symsrvs, &pe_id, self.offline)?
+        } else {
+            pe.pdb_id
+        };
+
         // Ingest the EAT.
         builder.ingest(pe.exports.into_iter());
 
-        // .. and see if it has PDB information.
-        if let Some(pdb_id) = pe.pdb_id {
+        if let Some(pdb_id) = pdb_id {
             trace!("Get PDB information for {module:?}/{pdb_id}..");
 
             // Try to get a PDB..

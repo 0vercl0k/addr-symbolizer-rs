@@ -371,7 +371,7 @@ impl<'module> PdbCacheBuilder<'module> {
                 Ok(o) => o,
                 Err(e) => {
                     // Let's log the failures as warning because we might care one day?
-                    warn!("failed to demangle {name}: {e}");
+                    trace!("failed to demangle {name}: {e}");
 
                     // But if it failed, returning the mangled name is better than nothing.
                     name.into_owned()
@@ -395,7 +395,7 @@ impl<'module> PdbCacheBuilder<'module> {
             .symbols
             .insert(rva, BuilderEntry::new(undecorated_name, len, source_info))
         {
-            warn!("symbol {prev:?} in dbi has a duplicate at {rva:#x}, skipping");
+            trace!("symbol {prev:?} in dbi has a duplicate at {rva:#x}, skipping");
         }
 
         Ok(())
