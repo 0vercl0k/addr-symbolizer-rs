@@ -273,18 +273,14 @@ fn download_pe() -> Result<()> {
 
     let stats = symb.stats();
     assert_eq!(stats.amount_pe_downloaded(), 1);
-        // File Type: DLL
-        // FILE HEADER VALUES
-        //     8664 machine (X64)
-        //        6 number of sections
-        // 7D1F08C1 time date stamp Tue Jul  8 20:10:57 2036
-        // ...
-        //     9000 size of image
-    assert!(stats.did_download_pe(PeId::new(
-        "clrhost.dll",
-        0x7D1F08C1,
-        0x9000,
-    )));
+    // File Type: DLL
+    // FILE HEADER VALUES
+    //     8664 machine (X64)
+    //        6 number of sections
+    // 7D1F08C1 time date stamp Tue Jul  8 20:10:57 2036
+    // ...
+    //     9000 size of image
+    assert!(stats.did_download_pe(PeId::new("clrhost.dll", 0x7D1F08C1, 0x9000,)));
 
     assert_eq!(stats.amount_pdb_downloaded(), 1);
     assert!(stats.did_download_pdb(PdbId::new(
