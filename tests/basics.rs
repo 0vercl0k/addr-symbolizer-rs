@@ -112,7 +112,7 @@ fn raw_virt() -> Result<()> {
     let mut symb = Builder::default()
         .modules(vec![Module::new("mrt100", 0x0, len)])
         .msft_symsrv()
-        .symcache(symcache)
+        .symcache(&symcache)
         .build()?;
 
     for (addr, expected_full, expected_modoff) in EXPECTED_RAW {
@@ -203,7 +203,7 @@ fn raw_file() -> Result<()> {
     let mut symb = Builder::default()
         .modules(vec![Module::new("mrt100", 0x0, len)])
         .online(vec!["https://msdl.microsoft.com/download/symbols/"])
-        .symcache(symcache)
+        .symcache(&symcache)
         .build()?;
 
     for (addr, expected_full, expected_modoff) in EXPECTED_RAW {
