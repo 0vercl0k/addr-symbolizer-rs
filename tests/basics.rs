@@ -37,12 +37,20 @@ fn testdata(name: &str) -> PathBuf {
 }
 
 struct ScopedPath {
-    path: PathBuf
+    path: PathBuf,
 }
 
 impl ScopedPath {
     fn new(path: impl AsRef<Path>) -> Self {
-        Self { path: path.as_ref().to_path_buf() }
+        Self {
+            path: path.as_ref().to_path_buf(),
+        }
+    }
+}
+
+impl AsRef<Path> for ScopedPath {
+    fn as_ref(&self) -> &Path {
+        &self.path
     }
 }
 
@@ -104,7 +112,7 @@ fn raw_virt() -> Result<()> {
     let mut symb = Builder::default()
         .modules(vec![Module::new("mrt100", 0x0, len)])
         .msft_symsrv()
-        .symcache(&symcache.path)
+        .symcache(symcache)
         .build()?;
 
     for (addr, expected_full, expected_modoff) in EXPECTED_RAW {
