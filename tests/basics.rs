@@ -193,39 +193,38 @@ impl<'data> AddrSpace for FileAddressSpace<'data> {
 }
 
 #[test]
-fn raw_file() {
-    let file = File::open(testdata("mrt100.dll")).unwrap();
+fn raw_file() -> Result<()> {
+    let file = File::open(testdata("mrt100.dll"))?;
     let cache = ReadCache::new(file);
-    let mut file_addr_space = FileAddressSpace::new(&cache).unwrap();
+    let mut file_addr_space = FileAddressSpace::new(&cache)?;
     let len = file_addr_space.len();
 
+    let symcache = symcache("basics")?;
     let mut symb = Builder::default()
         .modules(vec![Module::new("mrt100", 0x0, len)])
         .online(vec!["https://msdl.microsoft.com/download/symbols/"])
-        .symcache(symcache("basics"))
-        .build()
-        .unwrap();
+        .symcache(symcache)
+        .build()?;
 
     for (addr, expected_full, expected_modoff) in EXPECTED_RAW {
         let mut full = Vec::new();
-        symb.full(&mut file_addr_space, addr, &mut full).unwrap();
-        assert_eq!(String::from_utf8(full).unwrap(), expected_full);
+        symb.full(&mut file_addr_space, addr, &mut full)?;
+        assert_eq!(String::from_utf8(full)?, expected_full);
 
         let mut modoff = Vec::new();
-        symb.modoff(addr, &mut modoff).unwrap();
-        assert_eq!(String::from_utf8(modoff).unwrap(), expected_modoff);
+        symb.modoff(addr, &mut modoff)?;
+        assert_eq!(String::from_utf8(modoff)?, expected_modoff);
     }
 
     let stats = symb.stats();
     assert_eq!(stats.amount_pdb_downloaded(), 1);
-    assert!(stats.did_download(
-        PdbId::new(
-            "mrt100.pdb",
-            "A20DA44BF08DB27D2BA0928F79447C7D".parse().unwrap(),
-            1
-        )
-        .unwrap()
-    ));
+    assert!(stats.did_download_pdb(PdbId::new(
+        "mrt100.pdb",
+        "A20DA44BF08DB27D2BA0928F79447C7D".parse()?,
+        1
+    )?));
+
+    Ok(())
 }
 
 // #[derive(Debug)]
