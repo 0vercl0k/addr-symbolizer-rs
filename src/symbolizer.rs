@@ -22,6 +22,93 @@ use crate::pe::{PdbId, Pe, PeId, SymcacheEntry};
 use crate::stats::{Stats, StatsBuilder};
 use crate::{Error as E, Result};
 
+#[derive(Debug)]
+struct DownloadedFile {
+    path: PathBuf,
+    size: u64,
+}
+
+impl DownloadedFile {
+    fn new(path: impl AsRef<Path>, size: u64) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            size,
+        }
+    }
+}
+
+/// Where did we find this PDB? On the file-system somewhere, in a local symbol
+/// cache or downloaded on a symbol server.
+///
+/// This is used mainly to account for statistics; how many files were
+/// downloaded, etc.
+#[derive(Debug)]
+enum PdbLocationKind {
+    /// The PDB file was found on the file system but not in a symbol cache.
+    Local,
+    /// The PDB file was found on the file system in a local symbol cache.
+    LocalCache,
+    /// The PDB file was downloaded on a remote symbol server.
+    Download(u64),
+}
+
+#[derive(Debug)]
+struct DownloadedPdb {
+    kind: PdbLocationKind,
+    path: PathBuf,
+}
+
+impl DownloadedPdb {
+    fn new(kind: PdbLocationKind, path: PathBuf) -> Self {
+        Self { kind, path }
+    }
+}
+
+/// Where did we find this PE? In a local symbol cache or downloaded on a symbol
+/// server.
+///
+/// This is used mainly to account for statistics; how many files were
+/// downloaded, etc.
+#[derive(Debug)]
+enum PeLocationKind {
+    /// The PE file was found on the file system in a local symbol cache.
+    LocalCache,
+    /// The PE file was downloaded on a remote symbol server.
+    Download(u64),
+}
+
+#[derive(Debug)]
+struct DownloadedPe {
+    kind: PeLocationKind,
+    pdb_id: Option<PdbId>,
+}
+
+impl DownloadedPe {
+    fn new(kind: PeLocationKind, pdb_id: Option<PdbId>) -> Self {
+        Self { kind, pdb_id }
+    }
+}
+
+struct FileAddrSpace(File);
+
+impl FileAddrSpace {
+    fn new(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self(File::open(path.as_ref())?))
+    }
+}
+
+impl AddrSpace for FileAddrSpace {
+    fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.seek(io::SeekFrom::Start(addr))?;
+
+        self.0.read(buf)
+    }
+
+    fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<usize>> {
+        self.read_at(addr, buf).map(Some)
+    }
+}
+
 /// Format a symbol cache path for a PE/PDB.
 ///
 /// Here is an example for a PE:
@@ -58,11 +145,11 @@ pub fn format_symsrv_url(symsrv: &str, entry: &impl SymcacheEntry) -> String {
 ///
 /// The code iterates through every symbol servers, and stops as soon as it was
 /// able to download a matching file.
-pub fn download_from_symsrv(
+fn download_from_symsrv(
     symsrvs: &Vec<String>,
     sympath_dir: impl AsRef<Path>,
     entry: &impl SymcacheEntry,
-) -> Result<Option<PathBuf>> {
+) -> Result<Option<DownloadedFile>> {
     // Give a try to each of the symbol servers.
     for symsrv in symsrvs {
         // The way a symbol path is structured is that there is a directory per module..
@@ -115,47 +202,13 @@ pub fn download_from_symsrv(
         let file = File::create(&entry_path)
             .with_context(|| format!("failed to create {entry_path:?}"))?;
 
-        io::copy(&mut resp.into_reader(), &mut BufWriter::new(file))?;
+        let size = io::copy(&mut resp.into_reader(), &mut BufWriter::new(file))?;
 
         debug!("downloaded to {entry_path:?}");
-        return Ok(Some(entry_path));
+        return Ok(Some(DownloadedFile::new(entry_path, size)));
     }
 
     Ok(None)
-}
-
-/// Where did we find this PDB? On the file-system somewhere, in a local symbol
-/// cache or downloaded on a symbol server.
-///
-/// This is used mainly to account for statistics; how many files were
-/// downloaded, etc.
-enum PdbKind {
-    /// The PDB file was found on the file system but no in a symbol cache.
-    Local,
-    /// The PDB file was found on the file system in a local symbol cache.
-    LocalCache,
-    /// The PDB file was downloaded on a remote symbol server.
-    Download,
-}
-
-struct FileAddrSpace(File);
-
-impl FileAddrSpace {
-    fn new(path: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self(File::open(path.as_ref())?))
-    }
-}
-
-impl AddrSpace for FileAddrSpace {
-    fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.seek(io::SeekFrom::Start(addr))?;
-
-        self.0.read(buf)
-    }
-
-    fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<usize>> {
-        self.read_at(addr, buf).map(Some)
-    }
 }
 
 /// Try to download a PE file off the symbol servers, and if one is found, try
@@ -165,28 +218,32 @@ fn get_pdb_id_from_symsrvs(
     symsrvs: &Vec<String>,
     pe_id: &PeId,
     offline: bool,
-) -> Result<Option<PdbId>> {
+) -> Result<Option<DownloadedPe>> {
     if offline {
         return Ok(None);
     }
 
     let mut pe_path = format_symcache_path(sympath, pe_id);
-    if !pe_path.exists() {
+    let kind = if !pe_path.exists() {
         // We didn't find a PE on disk, so last resort is to try to download it.
         let Some(downloaded) = download_from_symsrv(symsrvs, sympath, pe_id)? else {
             debug!("did not find {pe_id} on any symbol server");
             return Ok(None);
         };
 
-        pe_path = downloaded;
-    }
+        pe_path = downloaded.path;
+
+        PeLocationKind::Download(downloaded.size)
+    } else {
+        PeLocationKind::LocalCache
+    };
 
     debug!("trying to parse {pe_path:?} from disk..");
     let pe_file = Pe::new(&mut FileAddrSpace::new(pe_path)?, 0)?;
 
     debug!("PDB id parsed from the PE: {:?}", pe_file.pdb_id);
 
-    Ok(pe_file.pdb_id)
+    Ok(Some(DownloadedPe::new(kind, pe_file.pdb_id)))
 }
 
 /// Try to find a PDB file online or locally from a [`PdbId`].
@@ -195,18 +252,24 @@ fn get_pdb(
     symsrvs: &Vec<String>,
     pdb_id: &PdbId,
     offline: bool,
-) -> Result<Option<(PathBuf, PdbKind)>> {
+) -> Result<Option<DownloadedPdb>> {
     // Let's see if the path exists locally..
     if pdb_id.path.is_file() {
         // .. if it does, this is a 'Local' PDB.
-        return Ok(Some((pdb_id.path.clone(), PdbKind::Local)));
+        return Ok(Some(DownloadedPdb::new(
+            PdbLocationKind::Local,
+            pdb_id.path.clone(),
+        )));
     }
 
     // Now, let's see if it's in the local cache..
     let local_path = format_symcache_path(sympath, pdb_id);
     if local_path.is_file() {
         // .. if it does, this is a 'LocalCache' PDB.
-        return Ok(Some((local_path, PdbKind::LocalCache)));
+        return Ok(Some(DownloadedPdb::new(
+            PdbLocationKind::LocalCache,
+            local_path,
+        )));
     }
 
     // If we're offline, let's just skip the downloading part.
@@ -217,7 +280,8 @@ fn get_pdb(
     // We didn't find a PDB on disk, so last resort is to try to download it.
     let downloaded_path = download_from_symsrv(symsrvs, sympath, pdb_id)?;
 
-    Ok(downloaded_path.map(|p| (p, PdbKind::Download)))
+    Ok(downloaded_path
+        .map(|file| DownloadedPdb::new(PdbLocationKind::Download(file.size), file.path)))
 }
 
 /// A simple 'hasher' that uses the input bytes as a hash.
@@ -392,7 +456,18 @@ impl Symbolizer {
             let pe_id = PeId::new(&module.name, pe.timestamp, pe.size);
             trace!("No PDB information found, trying to download PE file for {pe_id}..");
 
-            get_pdb_id_from_symsrvs(&self.symcache, &self.symsrvs, &pe_id, self.offline)?
+            let downloaded_pe =
+                get_pdb_id_from_symsrvs(&self.symcache, &self.symsrvs, &pe_id, self.offline)?;
+
+            if let Some(DownloadedPe {
+                kind: PeLocationKind::Download(size),
+                ..
+            }) = downloaded_pe
+            {
+                self.stats.downloaded_pe(pe_id, size);
+            }
+
+            downloaded_pe.and_then(|d| d.pdb_id)
         } else {
             pe.pdb_id
         };
@@ -404,16 +479,17 @@ impl Symbolizer {
             trace!("Get PDB information for {module:?}/{pdb_id}..");
 
             // Try to get a PDB..
-            let pdb_path = get_pdb(&self.symcache, &self.symsrvs, &pdb_id, self.offline)?;
+            let downloaded_pdb = get_pdb(&self.symcache, &self.symsrvs, &pdb_id, self.offline)?;
 
             // .. and ingest it if we have one.
-            if let Some((pdb_path, pdb_kind)) = pdb_path {
-                if matches!(pdb_kind, PdbKind::Download) {
-                    self.stats
-                        .downloaded_file(pdb_id, pdb_path.metadata()?.len())
-                }
-
-                builder.ingest_pdb(pdb_path)?;
+            if let Some(DownloadedPdb {
+                path,
+                kind: PdbLocationKind::Download(size),
+                ..
+            }) = downloaded_pdb
+            {
+                self.stats.downloaded_pdb(pdb_id, size);
+                builder.ingest_pdb(path)?;
             }
         }
 

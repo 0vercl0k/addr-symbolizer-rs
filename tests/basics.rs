@@ -1,14 +1,18 @@
 // Axel '0vercl0k' Souchet - May 30 2024
 // use std::cmp::min;
 use std::env::temp_dir;
+use std::error::Error;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
 
 use addr_symbolizer::{AddrSpace, Builder, Module, PdbId};
 use object::read::pe::PeFile64;
 use object::{NativeEndian, ReadCache, ReadRef};
 // use udmp_parser::UserDumpParser;
+
+type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const EXPECTED_LEN: u64 = 0x90_00;
 const EXPECTED_RAW: [(u64, &str, &str); 4] = [
@@ -32,12 +36,31 @@ fn testdata(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn symcache(name: &str) -> PathBuf {
-    let cache = temp_dir().join(name);
-    let _ = fs::remove_dir_all(&cache);
-    let _ = fs::create_dir(&cache);
+struct ScopedPath {
+    path: PathBuf
+}
 
-    cache
+impl ScopedPath {
+    fn new(path: impl AsRef<Path>) -> Self {
+        Self { path: path.as_ref().to_path_buf() }
+    }
+}
+
+impl Drop for ScopedPath {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.path).unwrap();
+    }
+}
+
+fn symcache(name: &str) -> Result<ScopedPath> {
+    let cache = temp_dir().join(format!("{}-{:?}", name, thread::current().id()));
+    if cache.exists() {
+        fs::remove_dir_all(&cache)?;
+    }
+
+    fs::create_dir(&cache)?;
+
+    Ok(ScopedPath::new(cache))
 }
 
 #[derive(Debug)]
@@ -73,37 +96,36 @@ impl AddrSpace for RawAddressSpace {
 }
 
 #[test]
-fn raw_virt() {
-    let mut raw_addr_space = RawAddressSpace::new(&testdata("mrt100.raw")).unwrap();
+fn raw_virt() -> Result<()> {
+    let mut raw_addr_space = RawAddressSpace::new(&testdata("mrt100.raw"))?;
     let len = raw_addr_space.len();
 
+    let symcache = symcache("basics")?;
     let mut symb = Builder::default()
         .modules(vec![Module::new("mrt100", 0x0, len)])
         .msft_symsrv()
-        .symcache(symcache("basics"))
-        .build()
-        .unwrap();
+        .symcache(&symcache.path)
+        .build()?;
 
     for (addr, expected_full, expected_modoff) in EXPECTED_RAW {
         let mut full = Vec::new();
-        symb.full(&mut raw_addr_space, addr, &mut full).unwrap();
-        assert_eq!(String::from_utf8(full).unwrap(), expected_full);
+        symb.full(&mut raw_addr_space, addr, &mut full)?;
+        assert_eq!(String::from_utf8(full)?, expected_full);
 
         let mut modoff = Vec::new();
-        symb.modoff(addr, &mut modoff).unwrap();
-        assert_eq!(String::from_utf8(modoff).unwrap(), expected_modoff);
+        symb.modoff(addr, &mut modoff)?;
+        assert_eq!(String::from_utf8(modoff)?, expected_modoff);
     }
 
     let stats = symb.stats();
     assert_eq!(stats.amount_pdb_downloaded(), 1);
-    assert!(stats.did_download(
-        PdbId::new(
-            "mrt100.pdb",
-            "A20DA44BF08DB27D2BA0928F79447C7D".parse().unwrap(),
-            1
-        )
-        .unwrap()
-    ));
+    assert!(stats.did_download_pdb(PdbId::new(
+        "mrt100.pdb",
+        "A20DA44BF08DB27D2BA0928F79447C7D".parse().unwrap(),
+        1
+    )?));
+
+    Ok(())
 }
 
 #[derive(Debug)]

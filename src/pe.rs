@@ -249,15 +249,15 @@ impl PdbId {
 /// [`PdbId`] isn't present (because for example the debug directory isn't
 /// present in the address space).
 #[derive(Debug, Default, PartialEq, Eq, Hash, Clone)]
-pub struct PeId<'s> {
-    pub name: &'s str,
+pub struct PeId {
+    pub name: String,
     pub timestamp: u32,
     pub size: u32,
 }
 
-impl<'s> SymcacheEntry for PeId<'s> {
+impl SymcacheEntry for PeId {
     fn name(&self) -> &str {
-        self.name
+        &self.name
     }
 
     fn index(&self) -> String {
@@ -265,17 +265,17 @@ impl<'s> SymcacheEntry for PeId<'s> {
     }
 }
 
-impl<'s> PeId<'s> {
-    pub fn new(name: &'s str, timestamp: u32, size: u32) -> Self {
+impl PeId {
+    pub fn new(name: impl Into<String>, timestamp: u32, size: u32) -> Self {
         Self {
-            name,
+            name: name.into(),
             timestamp,
             size,
         }
     }
 }
 
-impl<'s> Display for PeId<'s> {
+impl Display for PeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
             "{:?}:{:#x}:{:#x}",
