@@ -7,7 +7,7 @@ use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 
-use addr_symbolizer::{AddrSpace, Builder, Module, PdbId};
+use addr_symbolizer::{AddrSpace, Builder, Module, PdbId, PeId};
 use object::read::pe::PeFile64;
 use object::{NativeEndian, ReadCache, ReadRef};
 // use udmp_parser::UserDumpParser;
@@ -16,17 +16,20 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const EXPECTED_LEN: u64 = 0x90_00;
 const EXPECTED_RAW: [(u64, &str, &str); 4] = [
+    // Export
     (
-        0x19_50,
-        "mrt100!GetManagedRuntimeService+0x0",
-        "mrt100+0x00001950",
+        0x16_00,
+        "clrhost.dll!DllGetActivationFactory+0x0",
+        "clrhost.dll+0x00001600",
     ),
     (
-        0x19_30,
-        "mrt100!ManagedRuntimeServices::SetWerDataBuffer+0x0",
-        "mrt100+0x00001930",
+        0x10_a0,
+        "clrhost.dll!Microsoft::WRL::Details::ModuleBase::GetMidEntryPointer+0x0",
+        "clrhost.dll+0x000010a0",
     ),
+    // OOB
     (EXPECTED_LEN, "0x0000000000009000", "0x0000000000009000"),
+    // OOB+++
     (0xdeadbeef, "0x00000000deadbeef", "0x00000000deadbeef"),
 ];
 
@@ -105,12 +108,12 @@ impl AddrSpace for RawAddressSpace {
 
 #[test]
 fn raw_virt() -> Result<()> {
-    let mut raw_addr_space = RawAddressSpace::new(&testdata("mrt100.raw"))?;
+    let mut raw_addr_space = RawAddressSpace::new(&testdata("clrhost.raw"))?;
     let len = raw_addr_space.len();
 
     let symcache = symcache("basics")?;
     let mut symb = Builder::default()
-        .modules(vec![Module::new("mrt100", 0x0, len)])
+        .modules(vec![Module::new("clrhost.dll", 0x0, len)])
         .msft_symsrv()
         .symcache(&symcache)
         .build()?;
@@ -128,8 +131,8 @@ fn raw_virt() -> Result<()> {
     let stats = symb.stats();
     assert_eq!(stats.amount_pdb_downloaded(), 1);
     assert!(stats.did_download_pdb(PdbId::new(
-        "mrt100.pdb",
-        "A20DA44BF08DB27D2BA0928F79447C7D".parse().unwrap(),
+        "clrhost.pdb",
+        "59E5C589F2149783C04A42F26DA1CC23".parse().unwrap(),
         1
     )?));
 
@@ -194,14 +197,14 @@ impl<'data> AddrSpace for FileAddressSpace<'data> {
 
 #[test]
 fn raw_file() -> Result<()> {
-    let file = File::open(testdata("mrt100.dll"))?;
+    let file = File::open(testdata("clrhost.dll"))?;
     let cache = ReadCache::new(file);
     let mut file_addr_space = FileAddressSpace::new(&cache)?;
     let len = file_addr_space.len();
 
     let symcache = symcache("basics")?;
     let mut symb = Builder::default()
-        .modules(vec![Module::new("mrt100", 0x0, len)])
+        .modules(vec![Module::new("clrhost.dll", 0x0, len)])
         .online(vec!["https://msdl.microsoft.com/download/symbols/"])
         .symcache(&symcache)
         .build()?;
@@ -219,14 +222,79 @@ fn raw_file() -> Result<()> {
     let stats = symb.stats();
     assert_eq!(stats.amount_pdb_downloaded(), 1);
     assert!(stats.did_download_pdb(PdbId::new(
-        "mrt100.pdb",
-        "A20DA44BF08DB27D2BA0928F79447C7D".parse()?,
+        "clrhost.pdb",
+        "59E5C589F2149783C04A42F26DA1CC23".parse()?,
         1
     )?));
 
     Ok(())
 }
 
+struct FileAddrSpace(File);
+
+impl FileAddrSpace {
+    fn new(path: impl AsRef<Path>) -> Self {
+        Self(File::open(path.as_ref()).unwrap())
+    }
+}
+
+impl AddrSpace for FileAddrSpace {
+    fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.seek(io::SeekFrom::Start(addr))?;
+
+        self.0.read(buf)
+    }
+
+    fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<usize>> {
+        // 0:000> !dh clrhost
+        // ...
+        //     35D0 [      70] address [size] of Debug Directory
+        if (0x35D0..(0x35D0 + 0x70)).contains(&addr) {
+            return Ok(None);
+        }
+
+        self.read_at(addr, buf).map(Some)
+    }
+}
+
+#[test]
+fn download_pe() -> Result<()> {
+    let mut file_addr_space = FileAddrSpace::new(testdata("clrhost.dll"));
+    let len = file_addr_space.0.metadata()?.len();
+
+    let symcache = symcache("basics")?;
+    let mut symb = Builder::default()
+        .modules(vec![Module::new("clrhost.dll", 0x0, len)])
+        .online(vec!["https://msdl.microsoft.com/download/symbols/"])
+        .symcache(&symcache)
+        .build()?;
+
+    symb.full(&mut file_addr_space, 0, &mut Vec::new())?;
+
+    let stats = symb.stats();
+    assert_eq!(stats.amount_pe_downloaded(), 1);
+        // File Type: DLL
+        // FILE HEADER VALUES
+        //     8664 machine (X64)
+        //        6 number of sections
+        // 7D1F08C1 time date stamp Tue Jul  8 20:10:57 2036
+        // ...
+        //     9000 size of image
+    assert!(stats.did_download_pe(PeId::new(
+        "clrhost.dll",
+        0x7D1F08C1,
+        0x9000,
+    )));
+
+    assert_eq!(stats.amount_pdb_downloaded(), 1);
+    assert!(stats.did_download_pdb(PdbId::new(
+        "clrhost.pdb",
+        "59E5C589F2149783C04A42F26DA1CC23".parse()?,
+        1
+    )?));
+
+    Ok(())
+}
 // #[derive(Debug)]
 // struct UserDumpAddrSpace<'a>(UserDumpParser<'a>);
 

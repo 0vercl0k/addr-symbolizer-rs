@@ -15,6 +15,6 @@ pub use builder::Builder;
 pub use error::{Error, Result};
 pub use guid::Guid;
 pub use modules::{Module, Modules};
-pub use pe::PdbId;
+pub use pe::{PdbId, PeId};
 pub use stats::Stats;
 pub use symbolizer::Symbolizer;
