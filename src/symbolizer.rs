@@ -105,7 +105,9 @@ impl AddrSpace for FileAddrSpace {
     }
 
     fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<usize>> {
-        self.read_at(addr, buf).map(Some)
+        self.0.seek(io::SeekFrom::Start(addr))?;
+
+        Ok(self.0.read(buf).map(Some).unwrap_or(None))
     }
 }
 

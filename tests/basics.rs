@@ -1,5 +1,4 @@
 // Axel '0vercl0k' Souchet - May 30 2024
-// use std::cmp::min;
 use std::env::temp_dir;
 use std::error::Error;
 use std::fs::{self, File};
