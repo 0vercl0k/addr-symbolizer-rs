@@ -260,7 +260,7 @@ impl<'module> PdbCacheBuilder<'module> {
     /// The key is the start [`Rva`] of the symbol, and the value is its name.
     /// This is used to ingest for example a list of functions acquired from the
     /// EAT of a module.
-    pub fn ingest(&mut self, symbols: impl Iterator<Item = (Rva, String)>) {
+    pub fn ingest(&mut self, symbols: impl IntoIterator<Item = (Rva, String)>) {
         for (start, name) in symbols {
             self.symbols.insert(start, BuilderEntry::with_name(name));
         }

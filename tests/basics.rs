@@ -14,23 +14,47 @@ use object::{NativeEndian, ReadCache, ReadRef};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+#[derive(Debug)]
+struct Entry {
+    offset: u64,
+    full: &'static str,
+    modoff: &'static str,
+}
+
+impl Entry {
+    const fn new(offset: u64, full: &'static str, modoff: &'static str) -> Self {
+        Self {
+            offset,
+            full,
+            modoff,
+        }
+    }
+}
+
 const EXPECTED_LEN: u64 = 0x90_00;
-const EXPECTED_RAW: [(u64, &str, &str); 4] = [
-    // Export
-    (
-        0x16_00,
-        "clrhost.dll!DllGetActivationFactory+0x0",
-        "clrhost.dll+0x00001600",
-    ),
-    (
-        0x10_a0,
-        "clrhost.dll!Microsoft::WRL::Details::ModuleBase::GetMidEntryPointer+0x0",
-        "clrhost.dll+0x000010a0",
-    ),
-    // OOB
-    (EXPECTED_LEN, "0x0000000000009000", "0x0000000000009000"),
-    // OOB+++
-    (0xdeadbeef, "0x00000000deadbeef", "0x00000000deadbeef"),
+
+// This is an exported function that doesn't require PDB.
+const EXPORTED_FUNCTION: Entry = Entry::new(
+    0x16_00,
+    "clrhost.dll!DllGetActivationFactory+0x0",
+    "clrhost.dll+0x00001600",
+);
+
+// This is a private function that does require PDB.
+const PRIVATE_FUNCTION: Entry = Entry::new(
+    0x10_a0,
+    "clrhost.dll!Microsoft::WRL::Details::ModuleBase::GetMidEntryPointer+0x0",
+    "clrhost.dll+0x000010a0",
+);
+
+const SLIGHTLY_OOB: Entry = Entry::new(EXPECTED_LEN, "0x0000000000009000", "0x0000000000009000");
+const COMPLETELY_OOB: Entry = Entry::new(0xdeadbeef, "0x00000000deadbeef", "0x00000000deadbeef");
+
+const EXPECTED_RAW: [&Entry; 4] = [
+    &EXPORTED_FUNCTION,
+    &PRIVATE_FUNCTION,
+    &SLIGHTLY_OOB,
+    &COMPLETELY_OOB,
 ];
 
 fn testdata(name: &str) -> PathBuf {
@@ -118,14 +142,14 @@ fn raw_virt() -> Result<()> {
         .symcache(&symcache)
         .build()?;
 
-    for (addr, expected_full, expected_modoff) in EXPECTED_RAW {
+    for expected in EXPECTED_RAW {
         let mut full = Vec::new();
-        symb.full(&mut raw_addr_space, addr, &mut full)?;
-        assert_eq!(String::from_utf8(full)?, expected_full);
+        symb.full(&mut raw_addr_space, expected.offset, &mut full)?;
+        assert_eq!(String::from_utf8(full)?, expected.full);
 
         let mut modoff = Vec::new();
-        symb.modoff(addr, &mut modoff)?;
-        assert_eq!(String::from_utf8(modoff)?, expected_modoff);
+        symb.modoff(expected.offset, &mut modoff)?;
+        assert_eq!(String::from_utf8(modoff)?, expected.modoff);
     }
 
     let stats = symb.stats();
@@ -135,6 +159,58 @@ fn raw_virt() -> Result<()> {
         "59E5C589F2149783C04A42F26DA1CC23".parse().unwrap(),
         1
     )?));
+
+    // Create a new one, but this time it should hit the cache.
+    let mut symb = Builder::default()
+        .modules(vec![Module::new("clrhost.dll", 0x0, len)])
+        .msft_symsrv()
+        .symcache(&symcache)
+        .build()?;
+
+    for expected in EXPECTED_RAW {
+        let mut full = Vec::new();
+        symb.full(&mut raw_addr_space, expected.offset, &mut full)?;
+        assert_eq!(String::from_utf8(full)?, expected.full);
+
+        let mut modoff = Vec::new();
+        symb.modoff(expected.offset, &mut modoff)?;
+        assert_eq!(String::from_utf8(modoff)?, expected.modoff);
+    }
+
+    let stats = symb.stats();
+    assert_eq!(stats.amount_pdb_downloaded(), 0);
+    assert_eq!(stats.amount_downloaded(), 0);
+
+    Ok(())
+}
+
+#[test]
+fn raw_virt_offline() -> Result<()> {
+    let mut raw_addr_space = RawAddressSpace::new(&testdata("clrhost.raw"))?;
+    let len = raw_addr_space.len();
+
+    let symcache = symcache("basics")?;
+    let mut symb = Builder::default()
+        .modules(vec![Module::new("clrhost.dll", 0x0, len)])
+        .symcache(&symcache)
+        .build()?;
+
+    for expected in EXPECTED_RAW {
+        let mut modoff = Vec::new();
+        symb.modoff(expected.offset, &mut modoff)?;
+        assert_eq!(String::from_utf8(modoff)?, expected.modoff);
+    }
+
+    let mut full = Vec::new();
+    symb.full(&mut raw_addr_space, EXPORTED_FUNCTION.offset, &mut full)?;
+    assert_eq!(String::from_utf8(full)?, EXPORTED_FUNCTION.full);
+
+    let mut full = Vec::new();
+    symb.full(&mut raw_addr_space, PRIVATE_FUNCTION.offset, &mut full)?;
+    assert_ne!(String::from_utf8(full)?, PRIVATE_FUNCTION.full);
+
+    let stats = symb.stats();
+    assert_eq!(stats.amount_downloaded(), 0);
 
     Ok(())
 }
@@ -209,14 +285,14 @@ fn raw_file() -> Result<()> {
         .symcache(&symcache)
         .build()?;
 
-    for (addr, expected_full, expected_modoff) in EXPECTED_RAW {
+    for expected in EXPECTED_RAW {
         let mut full = Vec::new();
-        symb.full(&mut file_addr_space, addr, &mut full)?;
-        assert_eq!(String::from_utf8(full)?, expected_full);
+        symb.full(&mut file_addr_space, expected.offset, &mut full)?;
+        assert_eq!(String::from_utf8(full)?, expected.full);
 
         let mut modoff = Vec::new();
-        symb.modoff(addr, &mut modoff)?;
-        assert_eq!(String::from_utf8(modoff)?, expected_modoff);
+        symb.modoff(expected.offset, &mut modoff)?;
+        assert_eq!(String::from_utf8(modoff)?, expected.modoff);
     }
 
     let stats = symb.stats();

@@ -239,11 +239,13 @@ fn get_pdb_id_from_symsrvs(
     };
 
     debug!("trying to parse {pe_path:?} from disk..");
-    let pe_file = Pe::new(&mut FileAddrSpace::new(pe_path)?, 0)?;
+    let mut addr_space = FileAddrSpace::new(pe_path)?;
+    let pe_file = Pe::new(&mut addr_space, 0)?;
+    let pdb_id = pe_file.read_pdbid(&mut addr_space)?;
 
-    debug!("PDB id parsed from the PE: {:?}", pe_file.pdb_id);
+    debug!("PDB id parsed from the PE: {:?}", pdb_id);
 
-    Ok(Some(DownloadedPe::new(kind, pe_file.pdb_id)))
+    Ok(Some(DownloadedPe::new(kind, pdb_id)))
 }
 
 /// Try to find a PDB file online or locally from a [`PdbId`].
@@ -450,46 +452,45 @@ impl Symbolizer {
         // there's any.
         let pe = Pe::new(addr_space, module.at.start)?;
 
-        // .. and see if it has PDB information. If it doesn't try to download the
+        // Ingest the EAT.
+        builder.ingest(pe.read_exports(addr_space)?.unwrap_or_default());
+
+        // See if it has PDB information. If it doesn't try to download the
         // original PE file off symbol servers.
-        let pdb_id = if pe.pdb_id.is_none() {
+        let pdb_id = pe.read_pdbid(addr_space).and_then(|pdb_id| {
+            if pdb_id.is_some() {
+                return Ok(pdb_id);
+            }
+
             let pe_id = PeId::new(&module.name, pe.timestamp, pe.size);
             trace!("No PDB information found, trying to download PE file for {pe_id}..");
 
             let downloaded_pe =
                 get_pdb_id_from_symsrvs(&self.symcache, &self.symsrvs, &pe_id, self.offline)?;
 
-            if let Some(DownloadedPe {
-                kind: PeLocationKind::Download(size),
-                ..
-            }) = downloaded_pe
-            {
-                self.stats.downloaded_pe(pe_id, size);
-            }
+            Ok(downloaded_pe.and_then(|d| {
+                if let PeLocationKind::Download(size) = d.kind {
+                    self.stats.downloaded_pe(pe_id, size);
+                }
 
-            downloaded_pe.and_then(|d| d.pdb_id)
-        } else {
-            pe.pdb_id
-        };
-
-        // Ingest the EAT.
-        builder.ingest(pe.exports.into_iter());
+                d.pdb_id
+            }))
+        })?;
 
         if let Some(pdb_id) = pdb_id {
             trace!("Get PDB information for {module:?}/{pdb_id}..");
 
             // Try to get a PDB..
-            let downloaded_pdb = get_pdb(&self.symcache, &self.symsrvs, &pdb_id, self.offline)?;
-
-            // .. and ingest it if we have one.
-            if let Some(DownloadedPdb {
-                path,
-                kind: PdbLocationKind::Download(size),
-                ..
-            }) = downloaded_pdb
+            if let Some(downloaded_pdb) =
+                get_pdb(&self.symcache, &self.symsrvs, &pdb_id, self.offline)?
             {
-                self.stats.downloaded_pdb(pdb_id, size);
-                builder.ingest_pdb(path)?;
+                if let PdbLocationKind::Download(size) = downloaded_pdb.kind {
+                    self.stats.downloaded_pdb(pdb_id, size)
+                }
+
+                // .. and ingest it if we have one.
+                trace!("Ingesting PDB..");
+                builder.ingest_pdb(downloaded_pdb.path)?;
             }
         }
 

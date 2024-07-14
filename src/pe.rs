@@ -303,7 +303,7 @@ pub fn read_string(
     let mut terminated = false;
     for _ in 0..max {
         let mut buf = [0];
-        let Some(()) = addr_space
+        let Some(_) = addr_space
             .try_read_exact_at(addr, &mut buf)
             .context("failed reading null terminated string")?
         else {
@@ -358,10 +358,11 @@ where
 /// We are only interested in the PDB identifier and the Export Address Table.
 #[derive(Debug, Default)]
 pub struct Pe {
-    pub size: u32,
+    base: u64,
     pub timestamp: u32,
-    pub pdb_id: Option<PdbId>,
-    pub exports: Vec<(Rva, String)>,
+    pub size: u32,
+    debug_data_dir: ImageDataDirectory,
+    export_data_dir: ImageDataDirectory,
 }
 
 impl Pe {
@@ -404,43 +405,32 @@ impl Pe {
         let opt_hdr = read_struct_at::<ImageOptionalHeader64>(addr_space, opt_hdr_addr)
             .with_context(|| "failed to read ImageOptionalHeader64")?;
 
-        // Read the PDB information if there's any.
-        let pdb_id = Self::try_parse_debug_dir(addr_space, base, &opt_hdr)?;
-
-        // Read the EXPORT table if there's any.
-        let exports = match Self::try_parse_export_dir(addr_space, base, &opt_hdr) {
-            Ok(o) => o,
-            // Err(E::DumpParserError(KdmpParserError::AddrTranslation(_))) => None,
-            Err(e) => return Err(e),
-        }
-        .unwrap_or_default();
-
-        let timestamp = nt_hdr.file_hdr.time_date_stamp;
-        let size = opt_hdr.size_of_image;
+        // Get both the export / debug data directory.
+        let debug_data_dir = opt_hdr.data_directory[IMAGE_DIRECTORY_ENTRY_DEBUG];
+        let export_data_dir = opt_hdr.data_directory[IMAGE_DIRECTORY_ENTRY_EXPORT];
 
         Ok(Self {
-            size,
-            timestamp,
-            pdb_id,
-            exports,
+            base,
+            timestamp: nt_hdr.file_hdr.time_date_stamp,
+            size: opt_hdr.size_of_image,
+            debug_data_dir,
+            export_data_dir,
         })
     }
 
-    fn try_parse_debug_dir(
-        addr_space: &mut impl AddrSpace,
-        base: u64,
-        opt_hdr: &ImageOptionalHeader64,
-    ) -> Result<Option<PdbId>> {
+    pub fn read_pdbid(&self, addr_space: &mut impl AddrSpace) -> Result<Option<PdbId>> {
         // Let's check if there's an ImageDebugDirectory.
-        let debug_data_dir = opt_hdr.data_directory[IMAGE_DIRECTORY_ENTRY_DEBUG];
-        if usize::try_from(debug_data_dir.size).unwrap() < mem::size_of::<ImageDebugDirectory>() {
+        if usize::try_from(self.debug_data_dir.size).unwrap()
+            < mem::size_of::<ImageDebugDirectory>()
+        {
             debug!("debug dir is too small");
             return Ok(None);
         }
 
         // Read it.
-        let debug_dir_addr = base
-            .checked_add(debug_data_dir.virtual_address.into())
+        let debug_dir_addr = self
+            .base
+            .checked_add(self.debug_data_dir.virtual_address.into())
             .ok_or(anyhow!("overflow w/ debug_data_dir"))?;
         let Some(debug_dir) =
             try_read_struct_at::<ImageDebugDirectory>(addr_space, debug_dir_addr)?
@@ -464,7 +454,8 @@ impl Pe {
         }
 
         // Let's read it.
-        let codeview_addr = base
+        let codeview_addr = self
+            .base
             .checked_add(debug_dir.address_of_raw_data.into())
             .ok_or(anyhow!("overflow w/ debug_dir"))?;
         let Some(codeview) = try_read_struct_at::<Codeview>(addr_space, codeview_addr)? else {
@@ -483,7 +474,7 @@ impl Pe {
         // Allocate space for it, and read it.
         let mut file_name = vec![0; leftover];
         let file_name_addr = array_offset(
-            base,
+            self.base,
             debug_dir.address_of_raw_data,
             1,
             mem::size_of::<Codeview>(),
@@ -504,27 +495,30 @@ impl Pe {
         // All right, at this point we have everything we need: the PDB name / GUID /
         // age. Those are the three piece of information we need to download a PDB
         // off Microsoft's symbol server.
-        let path = PathBuf::from(String::from_utf8(file_name)?);
-
-        Ok(Some(PdbId::new(path, codeview.guid.into(), codeview.age)?))
+        Ok(Some(PdbId::new(
+            String::from_utf8(file_name)?,
+            codeview.guid.into(),
+            codeview.age,
+        )?))
     }
 
-    fn try_parse_export_dir(
+    pub fn read_exports(
+        &self,
         addr_space: &mut impl AddrSpace,
-        base: u64,
-        opt_hdr: &ImageOptionalHeader64,
     ) -> Result<Option<Vec<(Rva, String)>>> {
         // Let's check if there's an EAT.
         debug!("parsing EAT..");
-        let export_data_dir = opt_hdr.data_directory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-        if usize::try_from(export_data_dir.size)? < mem::size_of::<ImageExportDirectory>() {
-            debug!("export dir is too small");
+        if usize::try_from(self.export_data_dir.size).unwrap()
+            < mem::size_of::<ImageDebugDirectory>()
+        {
+            debug!("debug dir is too small");
             return Ok(None);
         }
 
         // Read it.
-        let export_dir_addr = base
-            .checked_add(u64::from(export_data_dir.virtual_address))
+        let export_dir_addr = self
+            .base
+            .checked_add(u64::from(self.export_data_dir.virtual_address))
             .ok_or(anyhow!("export_data_dir"))?;
         let Some(export_dir) =
             try_read_struct_at::<ImageExportDirectory>(addr_space, export_dir_addr)?
@@ -553,8 +547,9 @@ impl Pe {
         let mut ords = Vec::with_capacity(names.len());
         for name_idx in 0..n_names {
             // Read the name RVA's..
-            let name_rva_addr = array_offset(base, addr_of_names, name_idx, mem::size_of::<u32>())
-                .ok_or(anyhow!("name_rva_addr"))?;
+            let name_rva_addr =
+                array_offset(self.base, addr_of_names, name_idx, mem::size_of::<u32>())
+                    .ok_or(anyhow!("name_rva_addr"))?;
             let Some(name_rva) = try_read_struct_at::<u32>(addr_space, name_rva_addr)
                 .with_context(|| "failed to read EAT's name array".to_string())?
             else {
@@ -564,7 +559,8 @@ impl Pe {
                 return Ok(None);
             };
 
-            let name_addr = base
+            let name_addr = self
+                .base
                 .checked_add(name_rva.into())
                 .ok_or(anyhow!("overflow w/ name_addr"))?;
             // ..then read the string in memory.
@@ -575,7 +571,7 @@ impl Pe {
             names.push(name);
 
             // Read the ordinal.
-            let ord_addr = array_offset(base, addr_of_ords, name_idx, mem::size_of::<u16>())
+            let ord_addr = array_offset(self.base, addr_of_ords, name_idx, mem::size_of::<u16>())
                 .ok_or(anyhow!("ord_addr"))?;
             let Some(ord) = try_read_struct_at::<u16>(addr_space, ord_addr)
                 .context("failed to read EAT's ord array")?
@@ -601,7 +597,7 @@ impl Pe {
         for addr_idx in 0..n_functs {
             // Read the RVA.
             let address_rva_addr =
-                array_offset(base, addr_of_functs, addr_idx, mem::size_of::<u32>())
+                array_offset(self.base, addr_of_functs, addr_idx, mem::size_of::<u32>())
                     .ok_or(anyhow!("overflow w/ address_rva_addr"))?;
 
             let Some(address_rva) = try_read_struct_at::<u32>(addr_space, address_rva_addr)
@@ -618,10 +614,11 @@ impl Pe {
 
         // Time to build the EAT.
         let eat_range = Range {
-            start: export_data_dir.virtual_address,
-            end: export_data_dir
+            start: self.export_data_dir.virtual_address,
+            end: self
+                .export_data_dir
                 .virtual_address
-                .checked_add(export_data_dir.size)
+                .checked_add(self.export_data_dir.size)
                 .ok_or(anyhow!("overflow w/ export data dir size"))?,
         };
 
