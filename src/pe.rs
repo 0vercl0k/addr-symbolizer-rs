@@ -69,7 +69,7 @@ pub struct ImageDataDirectory {
 }
 
 /// The IMAGE_OPTIONAL_HEADER32.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 #[repr(C)]
 pub struct ImageOptionalHeader32 {
     pub magic: u16,
@@ -183,6 +183,7 @@ pub struct Codeview {
 }
 
 pub const IMAGE_NT_SIGNATURE: u32 = 17744;
+pub const IMAGE_FILE_MACHINE_I386: u16 = 332;
 pub const IMAGE_FILE_MACHINE_AMD64: u16 = 34404;
 pub const IMAGE_DIRECTORY_ENTRY_EXPORT: usize = 0;
 pub const IMAGE_DIRECTORY_ENTRY_DEBUG: usize = 6;
@@ -353,6 +354,39 @@ where
         .map(|_| unsafe { t.assume_init() }))
 }
 
+fn read_optional_headers(
+    machine: u16,
+    addr_space: &mut impl AddrSpace,
+    opt_hdr_addr: u64,
+    opt_hdr_size: usize,
+) -> Result<(ImageDataDirectory, ImageDataDirectory, u32)> {
+    Ok(if machine == IMAGE_FILE_MACHINE_AMD64 {
+        if opt_hdr_size < mem::size_of::<ImageOptionalHeader64>() {
+            return Err(anyhow!("optional header's size is too small").into());
+        }
+
+        let opt_hdr = read_struct_at::<ImageOptionalHeader64>(addr_space, opt_hdr_addr)?;
+
+        (
+            opt_hdr.data_directory[IMAGE_DIRECTORY_ENTRY_DEBUG],
+            opt_hdr.data_directory[IMAGE_DIRECTORY_ENTRY_EXPORT],
+            opt_hdr.size_of_image,
+        )
+    } else {
+        if opt_hdr_size < mem::size_of::<ImageOptionalHeader32>() {
+            return Err(anyhow!("optional header's size is too small").into());
+        }
+
+        let opt_hdr = read_struct_at::<ImageOptionalHeader32>(addr_space, opt_hdr_addr)?;
+
+        (
+            opt_hdr.data_directory[IMAGE_DIRECTORY_ENTRY_DEBUG],
+            opt_hdr.data_directory[IMAGE_DIRECTORY_ENTRY_EXPORT],
+            opt_hdr.size_of_image,
+        )
+    })
+}
+
 /// A parsed PE headers.
 ///
 /// We are only interested in the PDB identifier and the Export Address Table.
@@ -384,9 +418,10 @@ impl Pe {
             return Err(anyhow!("wrong PE signature for {base:#x}").into());
         }
 
-        // ..and let's ignore non x64 PEs.
-        if nt_hdr.file_hdr.machine != IMAGE_FILE_MACHINE_AMD64 {
-            return Err(anyhow!("wrong architecture for {base:#x}").into());
+        // ..and let's ignore non Intel PEs.
+        let machine = nt_hdr.file_hdr.machine;
+        if machine != IMAGE_FILE_MACHINE_AMD64 && machine != IMAGE_FILE_MACHINE_I386 {
+            return Err(anyhow!("unsupported architecture for {base:#x}").into());
         }
 
         // Now locate the optional header, and check that it looks big enough.
@@ -396,23 +431,14 @@ impl Pe {
         let opt_hdr_size = nt_hdr.file_hdr.size_of_optional_header as usize;
         debug!("parsing optional hdr @ {:#x}", opt_hdr_addr);
 
-        // If it's not big enough, let's bail.
-        if opt_hdr_size < mem::size_of::<ImageOptionalHeader64>() {
-            return Err(anyhow!("optional header's size is too small").into());
-        }
-
-        // Read the IMAGE_OPTIONAL_HEADER64.
-        let opt_hdr = read_struct_at::<ImageOptionalHeader64>(addr_space, opt_hdr_addr)
-            .with_context(|| "failed to read ImageOptionalHeader64")?;
-
         // Get both the export / debug data directory.
-        let debug_data_dir = opt_hdr.data_directory[IMAGE_DIRECTORY_ENTRY_DEBUG];
-        let export_data_dir = opt_hdr.data_directory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        let (debug_data_dir, export_data_dir, size_of_image) =
+            read_optional_headers(machine, addr_space, opt_hdr_addr, opt_hdr_size)?;
 
         Ok(Self {
             base,
             timestamp: nt_hdr.file_hdr.time_date_stamp,
-            size: opt_hdr.size_of_image,
+            size: size_of_image,
             debug_data_dir,
             export_data_dir,
         })
