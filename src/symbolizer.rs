@@ -548,14 +548,14 @@ impl Symbolizer {
         let mut buffer = [0; 16];
         if let Some(module) = self.modules.find(addr) {
             output.write_all(module.name.as_bytes())?;
-            output.write_all(&[b'+', b'0', b'x'])?;
+            output.write_all(b"+0x")?;
 
             output.write_all(fast_hex32(
                 &mut buffer[0..8].try_into().unwrap(),
                 module.rva(addr),
             ))
         } else {
-            output.write_all(&[b'0', b'x'])?;
+            output.write_all(b"0x")?;
 
             output.write_all(fast_hex64(&mut buffer, addr))
         }

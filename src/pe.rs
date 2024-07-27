@@ -68,6 +68,12 @@ pub struct ImageDataDirectory {
     pub size: u32,
 }
 
+trait ImageOptionalHeader {
+    fn debug_dir(&self) -> ImageDataDirectory;
+    fn export_dir(&self) -> ImageDataDirectory;
+    fn size_of_image(&self) -> u32;
+}
+
 /// The IMAGE_OPTIONAL_HEADER32.
 #[derive(Debug, Default, Clone, Copy)]
 #[repr(C)]
@@ -105,6 +111,20 @@ pub struct ImageOptionalHeader32 {
     pub data_directory: [ImageDataDirectory; 16],
 }
 
+impl ImageOptionalHeader for ImageOptionalHeader32 {
+    fn debug_dir(&self) -> ImageDataDirectory {
+        self.data_directory[IMAGE_DIRECTORY_ENTRY_DEBUG]
+    }
+
+    fn export_dir(&self) -> ImageDataDirectory {
+        self.data_directory[IMAGE_DIRECTORY_ENTRY_EXPORT]
+    }
+
+    fn size_of_image(&self) -> u32 {
+        self.size_of_image
+    }
+}
+
 /// The IMAGE_OPTIONAL_HEADER64.
 #[derive(Debug, Default, Clone, Copy)]
 #[repr(C, packed(4))]
@@ -139,6 +159,20 @@ pub struct ImageOptionalHeader64 {
     pub loader_flags: u32,
     pub number_of_rva_and_sizes: u32,
     pub data_directory: [ImageDataDirectory; 16],
+}
+
+impl ImageOptionalHeader for ImageOptionalHeader64 {
+    fn debug_dir(&self) -> ImageDataDirectory {
+        self.data_directory[IMAGE_DIRECTORY_ENTRY_DEBUG]
+    }
+
+    fn export_dir(&self) -> ImageDataDirectory {
+        self.data_directory[IMAGE_DIRECTORY_ENTRY_EXPORT]
+    }
+
+    fn size_of_image(&self) -> u32 {
+        self.size_of_image
+    }
 }
 
 /// The IMAGE_DEBUG_DIRECTORY.
@@ -354,37 +388,25 @@ where
         .map(|_| unsafe { t.assume_init() }))
 }
 
-fn read_optional_headers(
-    machine: u16,
+fn read_optional_headers<O>(
     addr_space: &mut impl AddrSpace,
     opt_hdr_addr: u64,
     opt_hdr_size: usize,
-) -> Result<(ImageDataDirectory, ImageDataDirectory, u32)> {
-    Ok(if machine == IMAGE_FILE_MACHINE_AMD64 {
-        if opt_hdr_size < mem::size_of::<ImageOptionalHeader64>() {
-            return Err(anyhow!("optional header's size is too small").into());
-        }
+) -> Result<(ImageDataDirectory, ImageDataDirectory, u32)>
+where
+    O: ImageOptionalHeader + Copy,
+{
+    if opt_hdr_size < mem::size_of::<O>() {
+        return Err(anyhow!("optional header's size is too small").into());
+    }
 
-        let opt_hdr = read_struct_at::<ImageOptionalHeader64>(addr_space, opt_hdr_addr)?;
+    let opt_hdr = read_struct_at::<O>(addr_space, opt_hdr_addr)?;
 
-        (
-            opt_hdr.data_directory[IMAGE_DIRECTORY_ENTRY_DEBUG],
-            opt_hdr.data_directory[IMAGE_DIRECTORY_ENTRY_EXPORT],
-            opt_hdr.size_of_image,
-        )
-    } else {
-        if opt_hdr_size < mem::size_of::<ImageOptionalHeader32>() {
-            return Err(anyhow!("optional header's size is too small").into());
-        }
-
-        let opt_hdr = read_struct_at::<ImageOptionalHeader32>(addr_space, opt_hdr_addr)?;
-
-        (
-            opt_hdr.data_directory[IMAGE_DIRECTORY_ENTRY_DEBUG],
-            opt_hdr.data_directory[IMAGE_DIRECTORY_ENTRY_EXPORT],
-            opt_hdr.size_of_image,
-        )
-    })
+    Ok((
+        opt_hdr.debug_dir(),
+        opt_hdr.export_dir(),
+        opt_hdr.size_of_image(),
+    ))
 }
 
 /// A parsed PE headers.
@@ -432,8 +454,21 @@ impl Pe {
         debug!("parsing optional hdr @ {:#x}", opt_hdr_addr);
 
         // Get both the export / debug data directory.
-        let (debug_data_dir, export_data_dir, size_of_image) =
-            read_optional_headers(machine, addr_space, opt_hdr_addr, opt_hdr_size)?;
+        let (debug_data_dir, export_data_dir, size_of_image) = {
+            if machine == IMAGE_FILE_MACHINE_AMD64 {
+                read_optional_headers::<ImageOptionalHeader64>(
+                    addr_space,
+                    opt_hdr_addr,
+                    opt_hdr_size,
+                )
+            } else {
+                read_optional_headers::<ImageOptionalHeader32>(
+                    addr_space,
+                    opt_hdr_addr,
+                    opt_hdr_size,
+                )
+            }
+        }?;
 
         Ok(Self {
             base,
