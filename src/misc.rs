@@ -101,30 +101,21 @@ mod tests {
     fn hex32() {
         let mut buffer = [0; 8];
         let out = fast_hex32(&mut buffer, 0xdeadbeef);
-        assert_eq!(out, &[b'd', b'e', b'a', b'd', b'b', b'e', b'e', b'f']);
+        assert_eq!(out, b"deadbeef");
         let out = fast_hex32(&mut buffer, 0xdead);
-        assert_eq!(out, &[b'0', b'0', b'0', b'0', b'd', b'e', b'a', b'd']);
+        assert_eq!(out, b"0000dead");
         let out = fast_hex32(&mut buffer, 0x0);
-        assert_eq!(out, &[b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0']);
+        assert_eq!(out, b"00000000");
     }
 
     #[test]
     fn hex64() {
         let mut buffer = [0; 16];
         let out = fast_hex64(&mut buffer, 0xdeadbeef_baadc0de);
-        assert_eq!(out, &[
-            b'd', b'e', b'a', b'd', b'b', b'e', b'e', b'f', b'b', b'a', b'a', b'd', b'c', b'0',
-            b'd', b'e'
-        ]);
+        assert_eq!(out, b"deadbeefbaadc0de");
         let out = fast_hex64(&mut buffer, 0xdeadbeef);
-        assert_eq!(out, &[
-            b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'd', b'e', b'a', b'd', b'b', b'e',
-            b'e', b'f'
-        ]);
+        assert_eq!(out, b"00000000deadbeef");
         let out = fast_hex64(&mut buffer, 0x0);
-        assert_eq!(out, &[
-            b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0',
-            b'0', b'0'
-        ]);
+        assert_eq!(out, b"0000000000000000");
     }
 }
