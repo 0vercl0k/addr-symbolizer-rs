@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use addr_symbolizer::{AddrSpace, Builder, Module, PdbId, PeId};
-use object::read::pe::PeFile64;
-use object::{NativeEndian, ReadCache, ReadRef};
+use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile};
+use object::{pe, ReadCache, ReadRef};
 // use udmp_parser::UserDumpParser;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -29,6 +29,22 @@ impl Entry {
         }
     }
 }
+
+// This is an exported function that doesn't require PDB.
+const EXPORTED_FUNCTION32: Entry = Entry::new(
+    0x19_c0,
+    "clrhost32.dll!DllGetActivationFactory+0x0",
+    "clrhost32.dll+0x000019c0",
+);
+
+// This is a private function that does require PDB.
+const PRIVATE_FUNCTION32: Entry = Entry::new(
+    0x16_e0,
+    "clrhost32.dll!Microsoft::WRL::Details::ModuleBase::GetMidEntryPointer+0x0",
+    "clrhost32.dll+0x000016e0",
+);
+
+const EXPECTED_RAW32: [&Entry; 2] = [&EXPORTED_FUNCTION32, &PRIVATE_FUNCTION32];
 
 const EXPECTED_LEN: u64 = 0x90_00;
 
@@ -215,22 +231,23 @@ fn raw_virt_offline() -> Result<()> {
 }
 
 #[derive(Debug)]
-struct FileAddressSpace<'data> {
-    pe: PeFile64<'data, &'data ReadCache<File>>,
+struct FileAddressSpace<'data, P>
+where
+    P: ImageNtHeaders,
+{
+    pe: PeFile<'data, P, &'data ReadCache<File>>,
     virt_len: u64,
 }
 
-impl<'data> FileAddressSpace<'data> {
+impl<'data, P> FileAddressSpace<'data, P>
+where
+    P: ImageNtHeaders,
+{
     fn new(cache: &'data ReadCache<File>) -> io::Result<Self> {
-        let pe =
-            PeFile64::parse(cache).map_err(|e| io::Error::new(io::ErrorKind::Unsupported, e))?;
+        let pe = PeFile::<P, &ReadCache<File>>::parse(cache)
+            .map_err(|e| io::Error::new(io::ErrorKind::Unsupported, e))?;
 
-        let virt_len = pe
-            .nt_headers()
-            .optional_header
-            .size_of_image
-            .get(NativeEndian)
-            .into();
+        let virt_len = pe.nt_headers().optional_header().size_of_image().into();
 
         Ok(Self { pe, virt_len })
     }
@@ -240,7 +257,10 @@ impl<'data> FileAddressSpace<'data> {
     }
 }
 
-impl<'data> AddrSpace for FileAddressSpace<'data> {
+impl<'data, P> AddrSpace for FileAddressSpace<'data, P>
+where
+    P: ImageNtHeaders,
+{
     fn read_at(&mut self, addr: u64, mut buf: &mut [u8]) -> std::io::Result<usize> {
         if addr >= self.virt_len {
             return Err(io::Error::new(
@@ -270,11 +290,14 @@ impl<'data> AddrSpace for FileAddressSpace<'data> {
     }
 }
 
+type FileAddressSpace64<'data> = FileAddressSpace<'data, pe::ImageNtHeaders64>;
+type FileAddressSpace32<'data> = FileAddressSpace<'data, pe::ImageNtHeaders32>;
+
 #[test]
 fn raw_file() -> Result<()> {
     let file = File::open(testdata("clrhost.dll"))?;
     let cache = ReadCache::new(file);
-    let mut file_addr_space = FileAddressSpace::new(&cache)?;
+    let mut file_addr_space = FileAddressSpace64::new(&cache)?;
     let len = file_addr_space.len();
 
     let symcache = symcache("basics")?;
@@ -299,6 +322,41 @@ fn raw_file() -> Result<()> {
     assert!(stats.did_download_pdb(PdbId::new(
         "clrhost.pdb",
         "59E5C589F2149783C04A42F26DA1CC23".parse()?,
+        1
+    )?));
+
+    Ok(())
+}
+
+#[test]
+fn raw_file32() -> Result<()> {
+    let file = File::open(testdata("clrhost32.dll"))?;
+    let cache = ReadCache::new(file);
+    let mut file_addr_space = FileAddressSpace32::new(&cache)?;
+    let len = file_addr_space.len();
+
+    let symcache = symcache("basics")?;
+    let mut symb = Builder::default()
+        .modules(vec![Module::new("clrhost32.dll", 0x0, len)])
+        .online(vec!["https://msdl.microsoft.com/download/symbols/"])
+        .symcache(&symcache)?
+        .build()?;
+
+    for expected in EXPECTED_RAW32 {
+        let mut full = Vec::new();
+        symb.full(&mut file_addr_space, expected.offset, &mut full)?;
+        assert_eq!(String::from_utf8(full)?, expected.full);
+
+        let mut modoff = Vec::new();
+        symb.modoff(expected.offset, &mut modoff)?;
+        assert_eq!(String::from_utf8(modoff)?, expected.modoff);
+    }
+
+    let stats = symb.stats();
+    assert_eq!(stats.amount_pdb_downloaded(), 1);
+    assert!(stats.did_download_pdb(PdbId::new(
+        "clrhost.pdb",
+        "FBB5EFC8A8DF311BCC600A47A42E8B55".parse()?,
         1
     )?));
 
