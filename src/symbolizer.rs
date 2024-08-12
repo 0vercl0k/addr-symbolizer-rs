@@ -53,12 +53,12 @@ enum PdbLocationKind {
 }
 
 #[derive(Debug)]
-struct DownloadedPdb {
+struct PdbLocation {
     kind: PdbLocationKind,
     path: PathBuf,
 }
 
-impl DownloadedPdb {
+impl PdbLocation {
     fn new(kind: PdbLocationKind, path: PathBuf) -> Self {
         Self { kind, path }
     }
@@ -224,11 +224,11 @@ fn get_pdb(
     symsrvs: &Vec<String>,
     pdb_id: &PdbId,
     offline: bool,
-) -> Result<Option<DownloadedPdb>> {
+) -> Result<Option<PdbLocation>> {
     // Let's see if the path exists locally..
     if pdb_id.path.is_file() {
         // .. if it does, this is a 'Local' PDB.
-        return Ok(Some(DownloadedPdb::new(
+        return Ok(Some(PdbLocation::new(
             PdbLocationKind::Local,
             pdb_id.path.clone(),
         )));
@@ -238,7 +238,7 @@ fn get_pdb(
     let local_path = format_symcache_path(sympath, pdb_id);
     if local_path.is_file() {
         // .. if it does, this is a 'LocalCache' PDB.
-        return Ok(Some(DownloadedPdb::new(
+        return Ok(Some(PdbLocation::new(
             PdbLocationKind::LocalCache,
             local_path,
         )));
@@ -253,7 +253,7 @@ fn get_pdb(
     let downloaded_path = download_from_symsrv(symsrvs, sympath, pdb_id)?;
 
     Ok(downloaded_path
-        .map(|file| DownloadedPdb::new(PdbLocationKind::Download(file.size), file.path)))
+        .map(|file| PdbLocation::new(PdbLocationKind::Download(file.size), file.path)))
 }
 
 /// A simple 'hasher' that uses the input bytes as a hash.
