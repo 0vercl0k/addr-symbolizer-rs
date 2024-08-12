@@ -90,7 +90,7 @@ fn user(dmp: UserDumpParser, addr: u64) -> Result<()> {
     let mut symb = Builder::default()
         .modules(modules)
         .msft_symsrv()
-        .symcache(sympath().expect("define a _NT_SYMBOL_PATH"))
+        .symcache(sympath().expect("define a _NT_SYMBOL_PATH"))?
         .build()?;
 
     let mut s = Vec::new();
@@ -131,7 +131,7 @@ fn kernel(dmp: KernelDumpParser, addr: u64) -> Result<()> {
     let mut symb = Builder::default()
         .modules(modules)
         .msft_symsrv()
-        .symcache(sympath().expect("define a _NT_SYMBOL_PATH"))
+        .symcache(sympath().expect("define a _NT_SYMBOL_PATH"))?
         .build()?;
 
     let mut s = Vec::new();

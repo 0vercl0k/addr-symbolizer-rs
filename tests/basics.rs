@@ -138,7 +138,7 @@ fn raw_virt() -> Result<()> {
     let mut symb = Builder::default()
         .modules(vec![Module::new("clrhost.dll", 0x0, len)])
         .msft_symsrv()
-        .symcache(&symcache)
+        .symcache(&symcache)?
         .build()?;
 
     for expected in EXPECTED_RAW {
@@ -163,7 +163,7 @@ fn raw_virt() -> Result<()> {
     let mut symb = Builder::default()
         .modules(vec![Module::new("clrhost.dll", 0x0, len)])
         .msft_symsrv()
-        .symcache(&symcache)
+        .symcache(&symcache)?
         .build()?;
 
     for expected in EXPECTED_RAW {
@@ -191,7 +191,7 @@ fn raw_virt_offline() -> Result<()> {
     let symcache = symcache("basics")?;
     let mut symb = Builder::default()
         .modules(vec![Module::new("clrhost.dll", 0x0, len)])
-        .symcache(&symcache)
+        .symcache(&symcache)?
         .build()?;
 
     for expected in EXPECTED_RAW {
@@ -281,7 +281,7 @@ fn raw_file() -> Result<()> {
     let mut symb = Builder::default()
         .modules(vec![Module::new("clrhost.dll", 0x0, len)])
         .online(vec!["https://msdl.microsoft.com/download/symbols/"])
-        .symcache(&symcache)
+        .symcache(&symcache)?
         .build()?;
 
     for expected in EXPECTED_RAW {
@@ -341,7 +341,7 @@ fn download_pe() -> Result<()> {
     let mut symb = Builder::default()
         .modules(vec![Module::new("clrhost.dll", 0x0, len)])
         .online(vec!["https://msdl.microsoft.com/download/symbols/"])
-        .symcache(&symcache)
+        .symcache(&symcache)?
         .build()?;
 
     symb.full(&mut file_addr_space, 0, &mut Vec::new())?;
