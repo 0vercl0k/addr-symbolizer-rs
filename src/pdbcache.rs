@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs::File;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
 use log::{trace, warn};
@@ -19,6 +19,39 @@ use pdb::{
 
 use crate::error::Result;
 use crate::modules::Module;
+use crate::pe::SymcacheEntry;
+
+/// Format a symbol cache path for a PE/PDB.
+///
+/// Here is an example for a PE:
+/// ```text
+/// C:\work\dbg\sym\hal.dll\4252FF428c000\hal.dll
+/// ^^^^^^^^^^^^^^^ ^^^^^^^ ^^^^^^^^^^^^^ ^^^^^^^
+///   cache path    PE name Timestamp Size PE name
+/// ```
+///
+/// Here is an example for a PDB:
+/// ```text
+/// C:\work\dbg\sym\ntfs.pdb\64D20DCBA29FFC0CD355FFE7440EC5F81\ntfs.pdb
+/// ^^^^^^^^^^^^^^^ ^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ^^^^^^^^
+///   cache path    PDB name PDB GUID & PDB Age                PDB name
+/// ```
+pub fn format_symcache_path(symsrv_cache: &Path, entry: &impl SymcacheEntry) -> PathBuf {
+    symsrv_cache
+        .join(entry.name())
+        .join(entry.index())
+        .join(entry.name())
+}
+
+/// Format a URL to find a PE/PDB on an HTTP symbol server.
+pub fn format_symsrv_url(symsrv: &str, entry: &impl SymcacheEntry) -> String {
+    format!(
+        "{symsrv}/{}/{}/{}",
+        entry.name(),
+        entry.index(),
+        entry.name()
+    )
+}
 
 /// A PDB opened via file access.
 type Pdb<'p> = pdb::PDB<'p, File>;

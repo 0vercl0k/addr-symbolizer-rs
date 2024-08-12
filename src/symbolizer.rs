@@ -17,7 +17,7 @@ use crate::addr_space::AddrSpace;
 use crate::builder::{Builder, NoSymcache};
 use crate::misc::{fast_hex32, fast_hex64};
 use crate::modules::{Module, Modules};
-use crate::pdbcache::{PdbCache, PdbCacheBuilder};
+use crate::pdbcache::{format_symcache_path, format_symsrv_url, PdbCache, PdbCacheBuilder};
 use crate::pe::{PdbId, Pe, PeId, SymcacheEntry};
 use crate::stats::{Stats, StatsBuilder};
 use crate::{Error as E, Result};
@@ -109,38 +109,6 @@ impl AddrSpace for FileAddrSpace {
 
         Ok(self.0.read(buf).map(Some).unwrap_or(None))
     }
-}
-
-/// Format a symbol cache path for a PE/PDB.
-///
-/// Here is an example for a PE:
-/// ```text
-/// C:\work\dbg\sym\hal.dll\4252FF428c000\hal.dll
-/// ^^^^^^^^^^^^^^^ ^^^^^^^ ^^^^^^^^^^^^^ ^^^^^^^
-///   cache path    PE name Timestamp Size PE name
-/// ```
-///
-/// Here is an example for a PDB:
-/// ```text
-/// C:\work\dbg\sym\ntfs.pdb\64D20DCBA29FFC0CD355FFE7440EC5F81\ntfs.pdb
-/// ^^^^^^^^^^^^^^^ ^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ^^^^^^^^
-///   cache path    PDB name PDB GUID & PDB Age                PDB name
-/// ```
-pub fn format_symcache_path(symsrv_cache: &Path, entry: &impl SymcacheEntry) -> PathBuf {
-    symsrv_cache
-        .join(entry.name())
-        .join(entry.index())
-        .join(entry.name())
-}
-
-/// Format a URL to find a PE/PDB on an HTTP symbol server.
-pub fn format_symsrv_url(symsrv: &str, entry: &impl SymcacheEntry) -> String {
-    format!(
-        "{symsrv}/{}/{}/{}",
-        entry.name(),
-        entry.index(),
-        entry.name()
-    )
 }
 
 /// Attempt to download a PE/PDB file from a list of symbol servers.
@@ -480,7 +448,7 @@ impl Symbolizer {
         })?;
 
         if let Some(pdb_id) = pdb_id {
-            trace!("Get PDB information for {module:?}/{pdb_id}..");
+            trace!("getting PDB information for {module:?}/{pdb_id}..");
 
             // Try to get a PDB..
             if let Some(downloaded_pdb) =
