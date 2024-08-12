@@ -78,12 +78,12 @@ enum PeLocationKind {
 }
 
 #[derive(Debug)]
-struct DownloadedPe {
+struct PeLocation {
     kind: PeLocationKind,
     pdb_id: Option<PdbId>,
 }
 
-impl DownloadedPe {
+impl PeLocation {
     fn new(kind: PeLocationKind, pdb_id: Option<PdbId>) -> Self {
         Self { kind, pdb_id }
     }
@@ -188,7 +188,7 @@ fn get_pdb_id_from_symsrvs(
     symsrvs: &Vec<String>,
     pe_id: &PeId,
     offline: bool,
-) -> Result<Option<DownloadedPe>> {
+) -> Result<Option<PeLocation>> {
     if offline {
         return Ok(None);
     }
@@ -215,7 +215,7 @@ fn get_pdb_id_from_symsrvs(
 
     debug!("PDB id parsed from the PE: {:?}", pdb_id);
 
-    Ok(Some(DownloadedPe::new(kind, pdb_id)))
+    Ok(Some(PeLocation::new(kind, pdb_id)))
 }
 
 /// Try to find a PDB file online or locally from a [`PdbId`].
