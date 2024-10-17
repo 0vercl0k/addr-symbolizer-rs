@@ -1,4 +1,5 @@
 // Axel '0vercl0k' Souchet - May 26th 2024
+#![doc = include_str!("../README.md")]
 mod addr_space;
 mod builder;
 mod error;
