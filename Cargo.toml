@@ -1,0 +1,33 @@
+[package]
+name = "addr-symbolizer"
+version = "0.1.0"
+categories = ["parser-implementations"]
+description = "A KISS Rust crate to symbolize function addresses using Windows PDB files."
+include = ["/Cargo.toml", "/LICENSE", "/src/**", "/examples/**", "README.md"]
+authors = ["Axel '0vercl0k' Souchet"]
+license = "MIT"
+rust-version = "1.70"
+repository = "https://github.com/0vercl0k/addr-symbolizer-rs"
+keywords = ["windows", "kernel", "crash-dump", "symbols", "pdb"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies]
+pdb = "0.8"
+log = "0.4"
+msvc-demangler = "0.10"
+ureq = { version = "2.9", default-features = false, features = ["tls", "gzip"] }
+thiserror = "1.0.61"
+anyhow = "1.0.86"
+
+[dev-dependencies]
+kdmp-parser = "0.4"
+udmp-parser = "0.2"
+object = { version = "0.36.0", default-features = false, features = [
+    "read",
+    "read_core",
+    "pe",
+    "std",
+] }
+clap = { version = "4.5", features = ["derive"] }
+env_logger = { version = "0.11" }
