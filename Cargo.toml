@@ -1,8 +1,8 @@
 [package]
 name = "addr-symbolizer"
 version = "0.1.0"
-# categories = ["command-line-utilities", "development-tools::debugging"]
-# description = "A fast execution trace symbolizer for Windows that runs on all major platforms and doesn't depend on any Microsoft libraries."
+categories = ["parser-implementations"]
+description = "A KISS Rust crate to symbolize function addresses using Windows PDB files."
 include = ["/Cargo.toml", "/LICENSE", "/src/**", "/examples/**", "README.md"]
 authors = ["Axel '0vercl0k' Souchet"]
 license = "MIT"
@@ -11,6 +11,7 @@ repository = "https://github.com/0vercl0k/addr-symbolizer-rs"
 keywords = ["windows", "kernel", "crash-dump", "symbols", "pdb"]
 edition = "2021"
 
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
 pdb = "0.8"
 log = "0.4"
