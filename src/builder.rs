@@ -27,18 +27,12 @@ impl<SC> Builder<SC> {
         self.online(vec!["https://msdl.microsoft.com/download/symbols/"])
     }
 
-    pub fn online(self, symsrvs: impl IntoIterator<Item = impl Into<String>>) -> Builder<SC> {
-        let Self {
-            symcache, modules, ..
-        } = self;
+    pub fn online(mut self, symsrvs: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.mode = PdbLookupMode::Online {
+            symsrvs: symsrvs.into_iter().map(Into::into).collect(),
+        };
 
-        Builder {
-            symcache,
-            modules,
-            mode: PdbLookupMode::Online {
-                symsrvs: symsrvs.into_iter().map(Into::into).collect(),
-            },
-        }
+        self
     }
 }
 
