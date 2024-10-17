@@ -149,6 +149,9 @@ fn hex(x: &str) -> Result<u64> {
 }
 
 fn main() -> Result<()> {
+    #[cfg(debug_assertions)]
+    env_logger::init();
+
     // Parse the CLI arguments.
     let args = CliArgs::parse();
     match args {
