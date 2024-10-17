@@ -4,7 +4,7 @@
     <strong>A <a href="https://en.wikipedia.org/wiki/KISS_principle">KISS</a> Rust crate to symbolize function addresses using Windows <a href="https://en.wikipedia.org/wiki/Program_database">PDB</a> files</strong>
   </p>
   <p>
-    <a href="https://crates.io/crates/addr-symbolizer-rs"><img src="https://img.shields.io/crates/v/addr-symbolizer-rs.svg" /></a>
+    <a href="https://crates.io/crates/addr-symbolizer"><img src="https://img.shields.io/crates/v/addr-symbolizer.svg" /></a>
     <img src='https://github.com/0vercl0k/addr-symbolizer-rs/workflows/Builds/badge.svg'/>
   </p>
   <p>
