@@ -20,7 +20,7 @@ thiserror = "2.0"
 anyhow = "1.0.86"
 
 [dev-dependencies]
-kdmp-parser = "0.5"
+kdmp-parser = { git = "https://github.com/0vercl0k/kdmp-parser-rs.git", branch = "fbl_pedantic" }
 udmp-parser = "0.2"
 object = { version = "0.38.0", default-features = false, features = [
     "read",
