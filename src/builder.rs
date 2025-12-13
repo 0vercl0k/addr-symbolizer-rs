@@ -1,5 +1,5 @@
-use std::fs::{self, File};
 // Axel '0vercl0k' Souchet - June 7 2024
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
@@ -94,7 +94,7 @@ impl Builder<Symcache> {
                     continue;
                 };
 
-                let mut pdb = pdb::PDB::open(File::open(&path)?)?;
+                let mut pdb = pdb2::PDB::open(File::open(&path)?)?;
                 let info = pdb.pdb_information()?;
                 let debug_info = pdb.debug_information()?;
                 let Some(age) = debug_info.age() else {

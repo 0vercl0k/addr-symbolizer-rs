@@ -10,9 +10,9 @@ use std::fs::File;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use log::{trace, warn};
-use pdb::{
+use pdb2::{
     AddressMap, FallibleIterator, LineProgram, PdbInternalSectionOffset, ProcedureSymbol,
     StringTable, Symbol,
 };
@@ -54,7 +54,7 @@ pub fn format_symsrv_url(symsrv: &str, entry: &impl SymcacheEntry) -> String {
 }
 
 /// A PDB opened via file access.
-type Pdb<'p> = pdb::PDB<'p, File>;
+type Pdb<'p> = pdb2::PDB<'p, File>;
 /// A relative virtual address.
 type Rva = u32;
 /// A vector of lines.
@@ -308,7 +308,7 @@ impl<'module> PdbCacheBuilder<'module> {
         line_program: &LineProgram,
     ) -> Result<()> {
         let proc_name = proc.name.to_string();
-        let Some(pdb::Rva(proc_rva)) = proc.offset.to_rva(address_map) else {
+        let Some(pdb2::Rva(proc_rva)) = proc.offset.to_rva(address_map) else {
             warn!(
                 "failed to get rva for procedure symbol {} / {:?}, skipping",
                 proc_name, proc.offset
@@ -321,7 +321,7 @@ impl<'module> PdbCacheBuilder<'module> {
         let mut main_path = None;
         let mut lines = Lines::new();
         while let Some(line) = lines_it.next()? {
-            let Some(pdb::Rva(line_rva)) = line.offset.to_rva(address_map) else {
+            let Some(pdb2::Rva(line_rva)) = line.offset.to_rva(address_map) else {
                 warn!(
                     "failed to get rva for procedure symbol {} / {:?}, skipping",
                     proc_name, proc.offset
@@ -416,7 +416,7 @@ impl<'module> PdbCacheBuilder<'module> {
         };
 
         // Get the RVA..
-        let pdb::Rva(rva) = offset.to_rva(address_map).ok_or_else(|| {
+        let pdb2::Rva(rva) = offset.to_rva(address_map).ok_or_else(|| {
             anyhow!(
                 "failed to get rva from symbol {undecorated_name} / {:?}, skipping",
                 offset
@@ -441,7 +441,7 @@ impl<'module> PdbCacheBuilder<'module> {
         symbol: &Symbol,
         extra: Option<(&StringTable, &LineProgram)>,
     ) -> Result<()> {
-        use pdb::SymbolData as SD;
+        use pdb2::SymbolData as SD;
         match symbol.parse()? {
             SD::Procedure(procedure) => {
                 let (string_table, line_program) = extra.unwrap();

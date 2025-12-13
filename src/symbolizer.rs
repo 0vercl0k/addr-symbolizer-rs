@@ -2,7 +2,7 @@
 //! This module contains the implementation of the [`Symbolizer`] which is the
 //! object that is able to symbolize files using PDB information if available.
 use std::cell::RefCell;
-use std::collections::{hash_map, HashMap};
+use std::collections::{HashMap, hash_map};
 use std::fs::{self, File};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{self, BufWriter, Read, Seek, Write};
@@ -10,14 +10,14 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use log::{debug, trace, warn};
 
 use crate::addr_space::AddrSpace;
 use crate::builder::{Builder, NoSymcache};
 use crate::misc::{fast_hex32, fast_hex64};
 use crate::modules::{Module, Modules};
-use crate::pdbcache::{format_symcache_path, format_symsrv_url, PdbCache, PdbCacheBuilder};
+use crate::pdbcache::{PdbCache, PdbCacheBuilder, format_symcache_path, format_symsrv_url};
 use crate::pe::{PdbId, Pe, PeId, SymcacheEntry};
 use crate::stats::{Stats, StatsBuilder};
 use crate::{Error as E, Result};
@@ -103,12 +103,6 @@ impl AddrSpace for FileAddrSpace {
 
         self.0.read(buf)
     }
-
-    fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<usize>> {
-        self.0.seek(io::SeekFrom::Start(addr))?;
-
-        Ok(self.0.read(buf).map(Some).unwrap_or(None))
-    }
 }
 
 /// Attempt to download a PE/PDB file from a list of symbol servers.
@@ -141,7 +135,7 @@ fn download_from_symsrv(
             Ok(o) => o,
             // If we get a 404, it means that the server doesn't know about this file. So we'll skip
             // to the next symbol server.
-            Err(ureq::Error::Status(404, ..)) => {
+            Err(ureq::Error::StatusCode(404)) => {
                 warn!("got a 404 for {entry_url}");
                 continue;
             }
@@ -172,7 +166,10 @@ fn download_from_symsrv(
         let file = File::create(&entry_path)
             .with_context(|| format!("failed to create {entry_path:?}"))?;
 
-        let size = io::copy(&mut resp.into_reader(), &mut BufWriter::new(file))?;
+        let size = io::copy(
+            &mut resp.into_body().into_reader(),
+            &mut BufWriter::new(file),
+        )?;
 
         debug!("downloaded to {entry_path:?}");
         return Ok(Some(DownloadedFile::new(entry_path, size)));
@@ -474,11 +471,12 @@ impl Symbolizer {
 
         // .. and store the sym cache to be used for next time we need to symbolize an
         // address from this module.
-        assert!(self
-            .pdb_caches
-            .borrow_mut()
-            .insert(module.at.clone(), Rc::new(pdbcache))
-            .is_none());
+        assert!(
+            self.pdb_caches
+                .borrow_mut()
+                .insert(module.at.clone(), Rc::new(pdbcache))
+                .is_none()
+        );
 
         Ok(Some(Rc::new(line)))
     }

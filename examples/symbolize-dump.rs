@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use addr_symbolizer::{AddrSpace, Builder, Module};
 use anyhow::Result;
 use clap::Parser;
-use kdmp_parser::KernelDumpParser;
+use kdmp_parser::parse::KernelDumpParser;
+use kdmp_parser::virt;
 use udmp_parser::UserDumpParser;
 
 /// The command line arguments.
@@ -39,8 +40,8 @@ fn sympath() -> Option<PathBuf> {
 
 fn user(dmp: UserDumpParser, addr: u64) -> Result<()> {
     #[derive(Debug)]
-    struct UserDumpAddrSpace<'a>(UserDumpParser<'a>);
-    impl<'a> AddrSpace for UserDumpAddrSpace<'a> {
+    struct UserDumpAddrSpace<'dmp>(UserDumpParser<'dmp>);
+    impl<'dmp> AddrSpace for UserDumpAddrSpace<'dmp> {
         fn read_at(&mut self, addr: u64, mut buf: &mut [u8]) -> io::Result<usize> {
             let mut cur_addr = addr;
             let mut read_len = 0;
@@ -64,13 +65,6 @@ fn user(dmp: UserDumpParser, addr: u64) -> Result<()> {
             }
 
             Ok(read_len)
-        }
-
-        fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<usize>> {
-            match self.read_at(addr, buf) {
-                Ok(sz) => Ok(Some(sz)),
-                Err(_) => Ok(None),
-            }
         }
     }
 
@@ -102,17 +96,11 @@ fn user(dmp: UserDumpParser, addr: u64) -> Result<()> {
 
 fn kernel(dmp: KernelDumpParser, addr: u64) -> Result<()> {
     #[derive(Debug)]
-    struct KernelDumpAdrSpace<'a>(&'a KernelDumpParser);
-    impl<'a> AddrSpace for KernelDumpAdrSpace<'a> {
+    struct KernelDumpAdrSpace<'dmp>(&'dmp KernelDumpParser);
+    impl<'dmp> AddrSpace for KernelDumpAdrSpace<'dmp> {
         fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
-            self.0
-                .virt_read(addr.into(), buf)
-                .map_err(|e| io::Error::new(io::ErrorKind::Unsupported, e))
-        }
-
-        fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<usize>> {
-            self.0
-                .try_virt_read(addr.into(), buf)
+            virt::Reader::new(&self.0)
+                .read(addr.into(), buf)
                 .map_err(|e| io::Error::new(io::ErrorKind::Unsupported, e))
         }
     }

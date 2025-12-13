@@ -8,7 +8,7 @@ use std::thread;
 
 use addr_symbolizer::{AddrSpace, Builder, Module, PdbId, PeId};
 use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile};
-use object::{pe, ReadCache, ReadRef};
+use object::{ReadCache, ReadRef, pe};
 // use udmp_parser::UserDumpParser;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -138,10 +138,6 @@ impl AddrSpace for RawAddressSpace {
         Seek::seek(&mut self.raw, io::SeekFrom::Start(addr))?;
 
         Read::read(&mut self.raw, buf)
-    }
-
-    fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> std::io::Result<Option<usize>> {
-        self.read_at(addr, buf).map(Some)
     }
 }
 
@@ -284,10 +280,6 @@ where
 
         buf.write(data)
     }
-
-    fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> std::io::Result<Option<usize>> {
-        self.read_at(addr, buf).map(Some)
-    }
 }
 
 type FileAddressSpace64<'data> = FileAddressSpace<'data, pe::ImageNtHeaders64>;
@@ -373,20 +365,16 @@ impl FileAddrSpace {
 
 impl AddrSpace for FileAddrSpace {
     fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.seek(io::SeekFrom::Start(addr))?;
-
-        self.0.read(buf)
-    }
-
-    fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<usize>> {
         // 0:000> !dh clrhost
         // ...
         //     35D0 [      70] address [size] of Debug Directory
         if (0x35D0..(0x35D0 + 0x70)).contains(&addr) {
-            return Ok(None);
+            return Ok(0);
         }
 
-        self.read_at(addr, buf).map(Some)
+        self.0.seek(io::SeekFrom::Start(addr))?;
+
+        self.0.read(buf)
     }
 }
 

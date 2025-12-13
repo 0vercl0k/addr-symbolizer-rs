@@ -60,21 +60,23 @@ impl StatsBuilder {
     }
 
     pub fn downloaded_pdb(&self, pdb_id: PdbId, size: u64) {
-        assert!(self
-            .inner
-            .borrow_mut()
-            .pdb_downloaded
-            .insert(pdb_id, size)
-            .is_none());
+        assert!(
+            self.inner
+                .borrow_mut()
+                .pdb_downloaded
+                .insert(pdb_id, size)
+                .is_none()
+        );
     }
 
     pub fn downloaded_pe(&self, pe_id: PeId, size: u64) {
-        assert!(self
-            .inner
-            .borrow_mut()
-            .pe_downloaded
-            .insert(pe_id, size)
-            .is_none());
+        assert!(
+            self.inner
+                .borrow_mut()
+                .pe_downloaded
+                .insert(pe_id, size)
+                .is_none()
+        );
     }
 
     pub fn addr_symbolized(&self) {

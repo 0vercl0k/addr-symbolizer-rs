@@ -1,12 +1,12 @@
 // Axel '0vercl0k' Souchet - February 19 2024
 //! This module contains the implementation of the PE parsing we do.
 use std::fmt::Display;
-use std::mem::{self, MaybeUninit};
+use std::mem::MaybeUninit;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::{io, slice};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use log::debug;
 
 use crate::addr_space::AddrSpace;
@@ -367,7 +367,7 @@ where
     S: Copy,
 {
     let mut t = MaybeUninit::uninit();
-    let size_of_t = mem::size_of_val(&t);
+    let size_of_t = size_of_val(&t);
     let slice_over_t = unsafe { slice::from_raw_parts_mut(t.as_mut_ptr() as *mut u8, size_of_t) };
 
     addr_space.read_exact_at(addr, slice_over_t)?;
@@ -380,7 +380,7 @@ where
     S: Copy,
 {
     let mut t: MaybeUninit<S> = MaybeUninit::uninit();
-    let size_of_t = mem::size_of_val(&t);
+    let size_of_t = size_of_val(&t);
     let slice_over_t = unsafe { slice::from_raw_parts_mut(t.as_mut_ptr() as *mut u8, size_of_t) };
 
     Ok(addr_space
@@ -396,7 +396,7 @@ fn read_optional_headers<O>(
 where
     O: ImageOptionalHeader + Copy,
 {
-    if opt_hdr_size < mem::size_of::<O>() {
+    if opt_hdr_size < size_of::<O>() {
         return Err(anyhow!("optional header's size is too small").into());
     }
 
@@ -448,7 +448,7 @@ impl Pe {
 
         // Now locate the optional header, and check that it looks big enough.
         let opt_hdr_addr = nt_hdr_addr
-            .checked_add(mem::size_of_val(&nt_hdr).try_into().unwrap())
+            .checked_add(size_of_val(&nt_hdr).try_into().unwrap())
             .ok_or(anyhow!("overflow w/ nt_hdr"))?;
         let opt_hdr_size = nt_hdr.file_hdr.size_of_optional_header as usize;
         debug!("parsing optional hdr @ {:#x}", opt_hdr_addr);
@@ -481,9 +481,7 @@ impl Pe {
 
     pub fn read_pdbid(&self, addr_space: &mut impl AddrSpace) -> Result<Option<PdbId>> {
         // Let's check if there's an ImageDebugDirectory.
-        if usize::try_from(self.debug_data_dir.size).unwrap()
-            < mem::size_of::<ImageDebugDirectory>()
-        {
+        if usize::try_from(self.debug_data_dir.size).unwrap() < size_of::<ImageDebugDirectory>() {
             debug!("debug dir is too small");
             return Ok(None);
         }
@@ -509,7 +507,7 @@ impl Pe {
         }
 
         // Let's make sure it's big enough to back a codeview structure.
-        if usize::try_from(debug_dir.size_of_data).unwrap() < mem::size_of::<Codeview>() {
+        if usize::try_from(debug_dir.size_of_data).unwrap() < size_of::<Codeview>() {
             debug!("codeview too small");
             return Ok(None);
         }
@@ -526,8 +524,7 @@ impl Pe {
 
         // The codeview structure is followed by a NULL terminated string which is the
         // module name.
-        let leftover =
-            usize::try_from(debug_dir.size_of_data).unwrap() - mem::size_of::<Codeview>();
+        let leftover = usize::try_from(debug_dir.size_of_data).unwrap() - size_of::<Codeview>();
         if leftover == 0 || leftover > 256 {
             return Err(E::CodeViewInvalidPath);
         }
@@ -538,20 +535,23 @@ impl Pe {
             self.base,
             debug_dir.address_of_raw_data,
             1,
-            mem::size_of::<Codeview>(),
+            size_of::<Codeview>(),
         )
         .ok_or(anyhow!("overflow w/ debug_dir filename"))?;
 
-        let Some(amount) = addr_space.try_read_at(file_name_addr, &mut file_name)? else {
-            return Ok(None);
-        };
+        let amount = addr_space.read_at(file_name_addr, &mut file_name)?;
+        if amount == 0 {
+            // XXX:
+            return Err(anyhow!("failed to read file_name").into());
+        }
 
         // The last character is supposed to be a NULL byte, bail if it's not there.
-        if *file_name.last().unwrap() != 0 {
+        let null_byte_idx = amount - 1;
+        if *file_name.get(null_byte_idx).unwrap() != 0 {
             return Err(anyhow!("the module path doesn't end with a NULL byte").into());
         }
 
-        file_name.resize(amount - 1, 0);
+        file_name.resize(null_byte_idx, 0);
 
         // All right, at this point we have everything we need: the PDB name / GUID /
         // age. Those are the three piece of information we need to download a PDB
@@ -569,9 +569,7 @@ impl Pe {
     ) -> Result<Option<Vec<(Rva, String)>>> {
         // Let's check if there's an EAT.
         debug!("parsing EAT..");
-        if usize::try_from(self.export_data_dir.size).unwrap()
-            < mem::size_of::<ImageDebugDirectory>()
-        {
+        if usize::try_from(self.export_data_dir.size).unwrap() < size_of::<ImageDebugDirectory>() {
             debug!("debug dir is too small");
             return Ok(None);
         }
@@ -584,7 +582,9 @@ impl Pe {
         let Some(export_dir) =
             try_read_struct_at::<ImageExportDirectory>(addr_space, export_dir_addr)?
         else {
-            debug!("failed to read ImageExportDirectory {export_dir_addr:#x} because of mem translation");
+            debug!(
+                "failed to read ImageExportDirectory {export_dir_addr:#x} because of mem translation"
+            );
             return Ok(None);
         };
 
@@ -608,9 +608,8 @@ impl Pe {
         let mut ords = Vec::with_capacity(names.len());
         for name_idx in 0..n_names {
             // Read the name RVA's..
-            let name_rva_addr =
-                array_offset(self.base, addr_of_names, name_idx, mem::size_of::<u32>())
-                    .ok_or(anyhow!("name_rva_addr"))?;
+            let name_rva_addr = array_offset(self.base, addr_of_names, name_idx, size_of::<u32>())
+                .ok_or(anyhow!("name_rva_addr"))?;
             let Some(name_rva) = try_read_struct_at::<u32>(addr_space, name_rva_addr)
                 .with_context(|| "failed to read EAT's name array".to_string())?
             else {
@@ -632,7 +631,7 @@ impl Pe {
             names.push(name);
 
             // Read the ordinal.
-            let ord_addr = array_offset(self.base, addr_of_ords, name_idx, mem::size_of::<u16>())
+            let ord_addr = array_offset(self.base, addr_of_ords, name_idx, size_of::<u16>())
                 .ok_or(anyhow!("ord_addr"))?;
             let Some(ord) = try_read_struct_at::<u16>(addr_space, ord_addr)
                 .context("failed to read EAT's ord array")?
@@ -658,13 +657,15 @@ impl Pe {
         for addr_idx in 0..n_functs {
             // Read the RVA.
             let address_rva_addr =
-                array_offset(self.base, addr_of_functs, addr_idx, mem::size_of::<u32>())
+                array_offset(self.base, addr_of_functs, addr_idx, size_of::<u32>())
                     .ok_or(anyhow!("overflow w/ address_rva_addr"))?;
 
             let Some(address_rva) = try_read_struct_at::<u32>(addr_space, address_rva_addr)
                 .with_context(|| "failed to read EAT's address array".to_string())?
             else {
-                debug!("failed to read EAT's address array {address_rva_addr:#x} because of mem translation");
+                debug!(
+                    "failed to read EAT's address array {address_rva_addr:#x} because of mem translation"
+                );
                 return Ok(None);
             };
 

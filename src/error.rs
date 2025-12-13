@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::str::Utf8Error;
 use std::string::FromUtf8Error;
 
-use pdb::PdbInternalSectionOffset;
+use pdb2::PdbInternalSectionOffset;
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -15,7 +15,7 @@ pub enum Error {
     #[error("failed to get rva from symbol {0} / {1:?}")]
     SymbolRva(String, PdbInternalSectionOffset),
     #[error("pdb error: {0}")]
-    Pdb(#[from] pdb::Error),
+    Pdb(#[from] pdb2::Error),
     #[error("from int error: {0}")]
     FromInt(#[from] TryFromIntError),
     #[error("parse int error: {0}")]

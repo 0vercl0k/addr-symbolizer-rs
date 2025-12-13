@@ -4,8 +4,6 @@ use std::io;
 pub trait AddrSpace {
     fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize>;
 
-    fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<usize>>;
-
     fn read_exact_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<()> {
         let size = self.read_at(addr, buf)?;
 
@@ -20,18 +18,9 @@ pub trait AddrSpace {
     }
 
     fn try_read_exact_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<()>> {
-        let Some(size) = self.try_read_at(addr, buf)? else {
-            return Ok(None);
-        };
+        let size = self.read_at(addr, buf)?;
 
-        if size != buf.len() {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("could read only {size} bytes instead of {}", buf.len()),
-            ))
-        } else {
-            Ok(Some(()))
-        }
+        Ok(if size != buf.len() { None } else { Some(()) })
     }
 }
 
@@ -41,9 +30,5 @@ where
 {
     fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
         T::read_at(self, addr, buf)
-    }
-
-    fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<usize>> {
-        T::try_read_at(self, addr, buf)
     }
 }
