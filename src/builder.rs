@@ -2,12 +2,11 @@
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
-use anyhow::anyhow;
 use log::{debug, info};
 
 use crate::pdbcache::format_symcache_path;
 use crate::symbolizer::{Config, PdbLookupMode};
-use crate::{Guid, Module, PdbId, Result, Symbolizer};
+use crate::{Error, Guid, Module, PdbId, Result, Symbolizer};
 
 #[derive(Default)]
 pub struct NoSymcache;
@@ -42,7 +41,10 @@ impl Builder<NoSymcache> {
     pub fn symcache(self, cache: impl AsRef<Path>) -> Result<Builder<Symcache>> {
         let cache = cache.as_ref();
         if !(cache.is_dir() && cache.exists()) {
-            return Err(anyhow!("{} isn't a dir or doesn't exist", cache.display()).into());
+            return Err(Error::Other(format!(
+                "{} isn't a dir or doesn't exist",
+                cache.display()
+            )));
         }
 
         let Self { modules, mode, .. } = self;
@@ -69,11 +71,10 @@ impl Builder<Symcache> {
         for dir in dirs {
             let dir = dir.as_ref();
             if !(dir.exists() && dir.is_dir()) {
-                return Err(anyhow!(
+                return Err(Error::Other(format!(
                     "cannot import pdb from {} as it doesn't exist or isn't a directory",
                     dir.display()
-                )
-                .into());
+                )));
             }
 
             for file in dir.read_dir()? {
@@ -119,7 +120,10 @@ impl Builder<Symcache> {
                 }
 
                 let Some(cached_pdb_dir) = cached_pdb.parent() else {
-                    return Err(anyhow!("{} has no parent", cached_pdb.display()).into());
+                    return Err(Error::Other(format!(
+                        "{} has no parent",
+                        cached_pdb.display()
+                    )));
                 };
 
                 info!(
@@ -143,7 +147,10 @@ impl Builder<Symcache> {
         } = self;
 
         if !symcache.0.exists() {
-            return Err(anyhow!("symcache {} does not exist", symcache.0.display()).into());
+            return Err(Error::Other(format!(
+                "symcache {} does not exist",
+                symcache.0.display()
+            )));
         }
 
         let config = Config {

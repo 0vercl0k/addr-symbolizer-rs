@@ -1,6 +1,6 @@
 [package]
 name = "addr-symbolizer"
-version = "0.1.0"
+version = "0.2.0"
 categories = ["parser-implementations"]
 description = "A KISS Rust crate to symbolize function addresses using Windows PDB files."
 include = ["/Cargo.toml", "/LICENSE", "/src/**", "/examples/**", "/tests/**", "README.md"]
@@ -17,7 +17,6 @@ log = "0.4"
 msvc-demangler = "0.11"
 ureq = { version = "3.1", default-features = false, features = ["rustls", "gzip"] }
 thiserror = "2.0"
-anyhow = "1.0.86"
 
 [dev-dependencies]
 kdmp-parser = { git = "https://github.com/0vercl0k/kdmp-parser-rs.git", branch = "fbl_pedantic" }
@@ -30,6 +29,7 @@ object = { version = "0.38.0", default-features = false, features = [
 ] }
 clap = { version = "4.5", features = ["derive"] }
 env_logger = { version = "0.11" }
+anyhow = "1.0.100"
 
 [lints.clippy]
 pedantic = "warn"

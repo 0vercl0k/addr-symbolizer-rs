@@ -10,13 +10,13 @@ use std::fs::File;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, anyhow};
 use log::{trace, warn};
 use pdb2::{
     AddressMap, FallibleIterator, LineProgram, PdbInternalSectionOffset, ProcedureSymbol,
     StringTable, Symbol,
 };
 
+use crate::Error;
 use crate::error::Result;
 use crate::modules::Module;
 use crate::pe::SymcacheEntry;
@@ -415,7 +415,9 @@ impl<'module> PdbCacheBuilder<'module> {
 
         // Get the RVA..
         let pdb2::Rva(rva) = offset.to_rva(address_map).ok_or_else(|| {
-            anyhow!("failed to get rva from symbol {undecorated_name} / {offset:?}, skipping")
+            Error::Other(format!(
+                "failed to get rva from symbol {undecorated_name} / {offset:?}, skipping"
+            ))
         })?;
 
         //.. and build an entry for this function.
@@ -469,7 +471,9 @@ impl<'module> PdbCacheBuilder<'module> {
         };
 
         // Grab the debug information stream..
-        let dbi = pdb.debug_information().context("failed to get dbi")?;
+        let dbi = pdb
+            .debug_information()
+            .map_err(|e| Error::Other(format!("failed to get dbi: {e}")))?;
         // ..and grab / walk through the 'modules'.
         let mut module_it = dbi.modules()?;
         while let Some(module) = module_it.next()? {
@@ -515,9 +519,10 @@ impl<'module> PdbCacheBuilder<'module> {
         // Open the PDB file.
         let pdb_path = pdb_path.as_ref();
         let pdb_file = File::open(pdb_path)
-            .with_context(|| format!("failed to open pdb {}", pdb_path.display()))?;
-        let mut pdb = Pdb::open(pdb_file)
-            .with_context(|| format!("failed to parse pdb {}", pdb_path.display()))?;
+            .map_err(|e| Error::Other(format!("failed to open pdb {}: {e}", pdb_path.display())))?;
+        let mut pdb = Pdb::open(pdb_file).map_err(|e| {
+            Error::Other(format!("failed to parse pdb {}: {e}", pdb_path.display()))
+        })?;
 
         trace!("ingesting {}..", pdb_path.display());
 
@@ -527,11 +532,11 @@ impl<'module> PdbCacheBuilder<'module> {
         // global symbols. And if there's duplicates, then we'd rather have the entry
         // that gives us the exact procedure length instead of us guessing.
         self.parse_dbi(&mut pdb, &address_map)
-            .map_err(|e| anyhow!("failed to parse private symbols: {e:?}"))?;
+            .map_err(|e| Error::Other(format!("failed to parse private symbols: {e:?}")))?;
 
         // Parse and extract all the bits we need from the global symbols..
         self.parse_global_symbols_table(&mut pdb, &address_map)
-            .map_err(|e| anyhow!("failed to parse public symbols: {e:?}"))?;
+            .map_err(|e| Error::Other(format!("failed to parse public symbols: {e:?}")))?;
 
         Ok(())
     }
@@ -547,7 +552,7 @@ impl<'module> PdbCacheBuilder<'module> {
                 // If we have a length, then use it!
                 start
                     .checked_add(len)
-                    .ok_or(anyhow!("overflow w/ symbol range"))?
+                    .ok_or(Error::Other("overflow w/ symbol range".to_string()))?
             } else {
                 // If we don't have one, the length of the current function is basically up to
                 // the next entry.
@@ -566,8 +571,9 @@ impl<'module> PdbCacheBuilder<'module> {
                     debug_assert!(self.module.at.end > self.module.at.start);
 
                     // If we popped the last value, just use the module end as the end of the range.
-                    u32::try_from(self.module.at.end - self.module.at.start)
-                        .context("failed to make the module's end into a rva")?
+                    u32::try_from(self.module.at.end - self.module.at.start).map_err(|_| {
+                        Error::Other("failed to make the module's end into a rva".to_string())
+                    })?
                 }
             };
 

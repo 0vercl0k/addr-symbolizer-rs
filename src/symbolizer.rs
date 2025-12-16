@@ -10,7 +10,6 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use anyhow::{Context, anyhow};
 use log::{debug, trace, warn};
 
 use crate::addr_space::AddrSpace;
@@ -20,7 +19,7 @@ use crate::modules::{Module, Modules};
 use crate::pdbcache::{PdbCache, PdbCacheBuilder, format_symcache_path, format_symsrv_url};
 use crate::pe::{PdbId, Pe, PeId, SymcacheEntry};
 use crate::stats::{Stats, StatsBuilder};
-use crate::{Error as E, Result};
+use crate::{Error, Error as E, Result};
 
 #[derive(Debug)]
 struct DownloadedFile {
@@ -152,23 +151,24 @@ fn download_from_symsrv(
         // structure in which we'll download the file into.
         if !entry_root_dir.try_exists()? {
             debug!("creating {}..", entry_root_dir.display());
-            fs::create_dir(&entry_root_dir).with_context(|| {
-                format!(
+            fs::create_dir(&entry_root_dir).map_err(|_| {
+                Error::Other(format!(
                     "failed to create base PE/PDB dir {}",
                     entry_root_dir.display()
-                )
+                ))
             })?;
         }
 
         if !entry_dir.try_exists()? {
             debug!("creating {}..", entry_dir.display());
-            fs::create_dir(&entry_dir)
-                .with_context(|| format!("failed to create pdb dir {}", entry_dir.display()))?;
+            fs::create_dir(&entry_dir).map_err(|_| {
+                Error::Other(format!("failed to create pdb dir {}", entry_dir.display()))
+            })?;
         }
 
         // Finally, we can download and save the file.
         let file = File::create(&entry_path)
-            .with_context(|| format!("failed to create {}", entry_path.display()))?;
+            .map_err(|_| Error::Other(format!("failed to create {}", entry_path.display())))?;
 
         let size = io::copy(
             &mut resp.into_body().into_reader(),
@@ -362,10 +362,10 @@ impl Symbolizer {
         };
 
         if !config.symcache.is_dir() {
-            return Err(anyhow!(
+            return Err(Error::Other(format!(
                 "{} directory does not exist",
                 config.symcache.display()
-            ))?;
+            )))?;
         }
 
         Ok(Self {
@@ -475,7 +475,7 @@ impl Symbolizer {
         // .. symbolize `addr`..
         let line = pdbcache
             .symbolize(module.rva(addr))
-            .with_context(|| format!("failed to symbolize {addr:#x}"))?;
+            .map_err(|_| Error::Other(format!("failed to symbolize {addr:#x}")))?;
 
         // .. and store the sym cache to be used for next time we need to symbolize an
         // address from this module.
@@ -533,7 +533,7 @@ impl Symbolizer {
 
             output.write_all(fast_hex64(&mut buffer, addr))
         }
-        .context("failed to write symbolized value to output")?;
+        .map_err(|_| Error::Other("failed to write symbolized value to output".to_string()))?;
 
         self.stats.addr_symbolized();
 
@@ -550,9 +550,9 @@ impl Symbolizer {
     ) -> Result<()> {
         match self.try_symbolize_addr(addr_space, addr)? {
             Some(sym) => {
-                output
-                    .write_all(sym.as_bytes())
-                    .context("failed to write symbolized value to output")?;
+                output.write_all(sym.as_bytes()).map_err(|_| {
+                    Error::Other("failed to write symbolized value to output".to_string())
+                })?;
 
                 self.stats.addr_symbolized();
                 Ok(())

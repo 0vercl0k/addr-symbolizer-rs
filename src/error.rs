@@ -36,5 +36,5 @@ pub enum Error {
     #[error("the module path is either 0 or larger than reasonable")]
     CodeViewInvalidPath,
     #[error("{0}")]
-    Anyhow(#[from] anyhow::Error),
+    Other(String),
 }

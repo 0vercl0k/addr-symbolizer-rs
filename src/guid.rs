@@ -3,8 +3,6 @@
 use std::fmt::Display;
 use std::str::FromStr;
 
-use anyhow::anyhow;
-
 use crate::Error;
 
 /// A GUID.
@@ -21,7 +19,9 @@ impl FromStr for Guid {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.len() != 32 {
-            return Err(anyhow!("the guid str ({s:?}) should be 32 bytes long").into());
+            return Err(Error::Other(format!(
+                "the guid str ({s:?}) should be 32 bytes long"
+            )));
         }
 
         let mut bytes = [0; 16];
