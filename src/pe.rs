@@ -14,7 +14,8 @@ use crate::guid::Guid;
 use crate::misc::Rva;
 use crate::{Error as E, Result};
 
-/// The IMAGE_DOS_HEADER.
+/// The `IMAGE_DOS_HEADER`.
+#[expect(clippy::struct_field_names)]
 #[derive(Default, Debug, Clone, Copy)]
 #[repr(C, packed(2))]
 pub struct ImageDosHeader {
@@ -39,7 +40,7 @@ pub struct ImageDosHeader {
     pub e_lfanew: i32,
 }
 
-/// The IMAGE_NT_HEADERS.
+/// The `IMAGE_NT_HEADERS`.
 #[derive(Default, Debug, Clone, Copy)]
 #[repr(C)]
 struct NtHeaders {
@@ -47,7 +48,7 @@ struct NtHeaders {
     file_hdr: ImageFileHeader,
 }
 
-/// The IMAGE_FILE_HEADER.
+/// The `IMAGE_FILE_HEADER`.
 #[derive(Default, Debug, Clone, Copy)]
 #[repr(C)]
 pub struct ImageFileHeader {
@@ -60,7 +61,7 @@ pub struct ImageFileHeader {
     pub characteristics: u16,
 }
 
-/// The IMAGE_DATA_DIRECTORY.
+/// The `IMAGE_DATA_DIRECTORY`.
 #[derive(Debug, Default, Clone, Copy)]
 #[repr(C)]
 pub struct ImageDataDirectory {
@@ -74,7 +75,7 @@ trait ImageOptionalHeader {
     fn size_of_image(&self) -> u32;
 }
 
-/// The IMAGE_OPTIONAL_HEADER32.
+/// The `IMAGE_OPTIONAL_HEADER32`.
 #[derive(Debug, Default, Clone, Copy)]
 #[repr(C)]
 pub struct ImageOptionalHeader32 {
@@ -125,7 +126,7 @@ impl ImageOptionalHeader for ImageOptionalHeader32 {
     }
 }
 
-/// The IMAGE_OPTIONAL_HEADER64.
+/// The `IMAGE_OPTIONAL_HEADER64`.
 #[derive(Debug, Default, Clone, Copy)]
 #[repr(C, packed(4))]
 pub struct ImageOptionalHeader64 {
@@ -175,7 +176,7 @@ impl ImageOptionalHeader for ImageOptionalHeader64 {
     }
 }
 
-/// The IMAGE_DEBUG_DIRECTORY.
+/// The `IMAGE_DEBUG_DIRECTORY`.
 #[derive(Default, Debug, Clone, Copy)]
 #[repr(C)]
 pub struct ImageDebugDirectory {
@@ -189,7 +190,7 @@ pub struct ImageDebugDirectory {
     pub pointer_to_raw_data: u32,
 }
 
-/// The IMAGE_EXPORT_DIRECTORY.
+/// The `IMAGE_EXPORT_DIRECTORY`.
 #[derive(Default, Debug, Clone, Copy)]
 #[repr(C)]
 pub struct ImageExportDirectory {
@@ -264,7 +265,7 @@ impl PdbId {
     pub fn new(path: impl Into<PathBuf>, guid: Guid, age: u32) -> Result<Self> {
         let path = path.into();
         let Some(name) = path.file_name() else {
-            return Err(E::PdbPathNoName(path.to_path_buf()));
+            return Err(E::PdbPathNoName(path.clone()));
         };
 
         let name = name.to_string_lossy().to_string();
@@ -338,7 +339,7 @@ pub fn read_string(
     let mut terminated = false;
     for _ in 0..max {
         let mut buf = [0];
-        let Some(_) = addr_space
+        let Some(()) = addr_space
             .try_read_exact_at(addr, &mut buf)
             .context("failed reading null terminated string")?
         else {
@@ -362,40 +363,34 @@ pub fn read_string(
     Ok(Some(s))
 }
 
-fn read_struct_at<S>(addr_space: &mut impl AddrSpace, addr: u64) -> io::Result<S>
-where
-    S: Copy,
-{
-    let mut t = MaybeUninit::uninit();
+fn read_struct_at<S: Copy>(addr_space: &mut impl AddrSpace, addr: u64) -> io::Result<S> {
+    let mut t = MaybeUninit::<S>::uninit();
     let size_of_t = size_of_val(&t);
-    let slice_over_t = unsafe { slice::from_raw_parts_mut(t.as_mut_ptr() as *mut u8, size_of_t) };
+    let slice_over_t = unsafe { slice::from_raw_parts_mut(t.as_mut_ptr().cast::<u8>(), size_of_t) };
 
     addr_space.read_exact_at(addr, slice_over_t)?;
 
     Ok(unsafe { t.assume_init() })
 }
 
-fn try_read_struct_at<S>(addr_space: &mut impl AddrSpace, addr: u64) -> io::Result<Option<S>>
-where
-    S: Copy,
-{
+fn try_read_struct_at<S: Copy>(
+    addr_space: &mut impl AddrSpace,
+    addr: u64,
+) -> io::Result<Option<S>> {
     let mut t: MaybeUninit<S> = MaybeUninit::uninit();
     let size_of_t = size_of_val(&t);
-    let slice_over_t = unsafe { slice::from_raw_parts_mut(t.as_mut_ptr() as *mut u8, size_of_t) };
+    let slice_over_t = unsafe { slice::from_raw_parts_mut(t.as_mut_ptr().cast::<u8>(), size_of_t) };
 
     Ok(addr_space
         .try_read_exact_at(addr, slice_over_t)?
-        .map(|_| unsafe { t.assume_init() }))
+        .map(|()| unsafe { t.assume_init() }))
 }
 
-fn read_optional_headers<O>(
+fn read_optional_headers<O: ImageOptionalHeader + Copy>(
     addr_space: &mut impl AddrSpace,
     opt_hdr_addr: u64,
     opt_hdr_size: usize,
-) -> Result<(ImageDataDirectory, ImageDataDirectory, u32)>
-where
-    O: ImageOptionalHeader + Copy,
-{
+) -> Result<(ImageDataDirectory, ImageDataDirectory, u32)> {
     if opt_hdr_size < size_of::<O>() {
         return Err(anyhow!("optional header's size is too small").into());
     }
@@ -424,7 +419,7 @@ pub struct Pe {
 impl Pe {
     pub fn new(addr_space: &mut impl AddrSpace, base: u64) -> Result<Self> {
         // All right let's parse the PE.
-        debug!("parsing PE @ {:#x}", base);
+        debug!("parsing PE @ {base:#x}");
 
         // Read the DOS/NT headers.
         let dos_hdr = read_struct_at::<ImageDosHeader>(addr_space, base)
@@ -451,7 +446,7 @@ impl Pe {
             .checked_add(size_of_val(&nt_hdr).try_into().unwrap())
             .ok_or(anyhow!("overflow w/ nt_hdr"))?;
         let opt_hdr_size = nt_hdr.file_hdr.size_of_optional_header as usize;
-        debug!("parsing optional hdr @ {:#x}", opt_hdr_addr);
+        debug!("parsing optional hdr @ {opt_hdr_addr:#x}");
 
         // Get both the export / debug data directory.
         let (debug_data_dir, export_data_dir, size_of_image) = {
@@ -692,8 +687,10 @@ impl Pe {
             let name = ords
                 .iter()
                 .position(|&o| usize::from(o) == unbiased_ordinal)
-                .map(|name_idx| names[name_idx].clone())
-                .unwrap_or_else(|| format!("ORD#{ordinal}"));
+                .map_or_else(
+                    || format!("ORD#{ordinal}"),
+                    |name_idx| names[name_idx].clone(),
+                );
 
             let forwarder = eat_range.contains(&addr_rva);
             if !forwarder {

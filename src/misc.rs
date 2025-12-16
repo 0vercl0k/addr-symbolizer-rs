@@ -10,7 +10,7 @@ pub type Rva = u32;
 /// Highly inspired by 'Fast unsigned integer to hex string' by Johnny Lee:
 ///   - <https://johnnylee-sde.github.io/Fast-unsigned-integer-to-hex-string/>
 pub fn fast_hex64(buffer: &mut [u8; 16], u: u64) -> &[u8] {
-    let mut x = u as u128;
+    let mut x = u128::from(u);
 
     // Arrange each digit into their own byte. Each byte will become the ascii
     // character representing its digit. For example, we want to arrange:
@@ -24,11 +24,12 @@ pub fn fast_hex64(buffer: &mut [u8; 16], u: u64) -> &[u8] {
     //   4. `x = 0x0D0E0A0D_0B0E0E0F_0B0A0A0D_0C000D0E`
     //
     // Let's start the dance..
-    x = (x & 0xFFFFFFFF_00000000) << 32 | x;
-    x = ((x & 0xFFFF0000_00000000_FFFF0000) << 32) | ((x & 0xFFFF_00000000_0000FFFF) << 16);
-    x = ((x & 0xFF0000_00FF0000_00FF0000_00FF0000) >> 16)
-        | ((x & 0xFF000000_FF000000_FF000000_FF000000) >> 8);
-    x = ((x & 0xF000F0_00F000F0_00F000F0_00F000F0) << 4) | (x & 0xF000F_000F000F_000F000F_000F000F);
+    x = (x & 0xFFFF_FFFF_0000_0000) << 32 | x;
+    x = ((x & 0xFFFF_0000_0000_0000_FFFF_0000) << 32) | ((x & 0xFFFF_0000_0000_0000_FFFF) << 16);
+    x = ((x & 0x00FF_0000_00FF_0000_00FF_0000_00FF_0000) >> 16)
+        | ((x & 0xFF00_0000_FF00_0000_FF00_0000_FF00_0000) >> 8);
+    x = ((x & 0x00F0_00F0_00F0_00F0_00F0_00F0_00F0_00F0) << 4)
+        | (x & 0x000F_000F_000F_000F_000F_000F_000F_000F);
 
     // This creates a mask where there'll be a 0x01 byte for each digit that is
     // alpha. For example, for `0x0D0E0A0D_0B0E0E0F_0B0A0A0D_0C000D0E` we want:
@@ -37,13 +38,13 @@ pub fn fast_hex64(buffer: &mut [u8; 16], u: u64) -> &[u8] {
     // the leading '1'). Note that we need to ADD, not an OR :). At this point,
     // right shifting by 4 bits means to position that leading '1' in the lower
     // nibble which is then 'grabbed' via the masking with 0x01..
-    let mask =
-        ((x + 0x06060606_06060606_06060606_06060606) >> 4) & 0x01010101_01010101_01010101_01010101;
+    let mask = ((x + 0x0606_0606_0606_0606_0606_0606_0606_0606) >> 4)
+        & 0x0101_0101_0101_0101_0101_0101_0101_0101;
 
     // Turn each digit into their ASCII equivalent by setting the high nibble of
     // each byte to 0x3. `0x0D0E0A0D_0B0E0E0F_0B0A0A0D_0C000D0E` becomes
     // `0x3D3E3A3D_3B3E3E3F_3B3A3A3D_3C303D3E`.
-    x |= 0x30303030_30303030_30303030_30303030;
+    x |= 0x3030_3030_3030_3030_3030_3030_3030_3030;
 
     // The last step is to adjust the ASCII byte for every digit that was in
     // 0xA..0xF. We basically add to each of those bytes `0x27` to make them lower
@@ -74,18 +75,18 @@ pub fn fast_hex64(buffer: &mut [u8; 16], u: u64) -> &[u8] {
 /// Adapted to not bother shuffling the bytes in little endian; we simply read
 /// the final integer as big endian.
 pub fn fast_hex32(buffer: &mut [u8; 8], u: u32) -> &[u8] {
-    let mut x = u as u64;
+    let mut x = u64::from(u);
 
     // Here's a step by step using `0xDEADBEEF`:
     //   1. `x = 0x0000DEAD_0000BEEF`
     //   2. `x = 0xDE00AD00_BE00EF00`
     //   3. `x = 0x0D0E0A0D_0B0E0E0F`
-    x = (x & 0xFFFF0000) << 16 | x;
-    x = ((x & 0x0000FF00_0000FF00) << 16) | ((x & 0x000000FF_000000FF) << 8);
-    x = ((x & 0xF000F000_F000F000) >> 4) | ((x & 0x0F000F00_0F000F00) >> 8);
+    x = (x & 0xFFFF_0000) << 16 | x;
+    x = ((x & 0x0000_FF00_0000_FF00) << 16) | ((x & 0x0000_00FF_0000_00FF) << 8);
+    x = ((x & 0xF000_F000_F000_F000) >> 4) | ((x & 0x0F00_0F00_0F00_0F00) >> 8);
 
-    let mask = ((x + 0x06060606_06060606) >> 4) & 0x01010101_01010101;
-    x |= 0x30303030_30303030;
+    let mask = ((x + 0x0606_0606_0606_0606) >> 4) & 0x0101_0101_0101_0101;
+    x |= 0x3030_3030_3030_3030;
     x += 0x27 * mask;
 
     buffer.copy_from_slice(&x.to_be_bytes());
@@ -100,7 +101,7 @@ mod tests {
     #[test]
     fn hex32() {
         let mut buffer = [0; 8];
-        let out = fast_hex32(&mut buffer, 0xdeadbeef);
+        let out = fast_hex32(&mut buffer, 0xdead_beef);
         assert_eq!(out, b"deadbeef");
         let out = fast_hex32(&mut buffer, 0xdead);
         assert_eq!(out, b"0000dead");
@@ -111,9 +112,9 @@ mod tests {
     #[test]
     fn hex64() {
         let mut buffer = [0; 16];
-        let out = fast_hex64(&mut buffer, 0xdeadbeef_baadc0de);
+        let out = fast_hex64(&mut buffer, 0xdead_beef_baad_c0de);
         assert_eq!(out, b"deadbeefbaadc0de");
-        let out = fast_hex64(&mut buffer, 0xdeadbeef);
+        let out = fast_hex64(&mut buffer, 0xdead_beef);
         assert_eq!(out, b"00000000deadbeef");
         let out = fast_hex64(&mut buffer, 0x0);
         assert_eq!(out, b"0000000000000000");

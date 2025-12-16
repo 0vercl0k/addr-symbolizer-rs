@@ -151,27 +151,31 @@ fn download_from_symsrv(
         // If the server knows about this file, it is time to create the directory
         // structure in which we'll download the file into.
         if !entry_root_dir.try_exists()? {
-            debug!("creating {entry_root_dir:?}..");
-            fs::create_dir(&entry_root_dir)
-                .with_context(|| format!("failed to create base PE/PDB dir {entry_root_dir:?}"))?;
+            debug!("creating {}..", entry_root_dir.display());
+            fs::create_dir(&entry_root_dir).with_context(|| {
+                format!(
+                    "failed to create base PE/PDB dir {}",
+                    entry_root_dir.display()
+                )
+            })?;
         }
 
         if !entry_dir.try_exists()? {
-            debug!("creating {entry_dir:?}..");
+            debug!("creating {}..", entry_dir.display());
             fs::create_dir(&entry_dir)
-                .with_context(|| format!("failed to create pdb dir {entry_dir:?}"))?;
+                .with_context(|| format!("failed to create pdb dir {}", entry_dir.display()))?;
         }
 
         // Finally, we can download and save the file.
         let file = File::create(&entry_path)
-            .with_context(|| format!("failed to create {entry_path:?}"))?;
+            .with_context(|| format!("failed to create {}", entry_path.display()))?;
 
         let size = io::copy(
             &mut resp.into_body().into_reader(),
             &mut BufWriter::new(file),
         )?;
 
-        debug!("downloaded to {entry_path:?}");
+        debug!("downloaded to {}", entry_path.display());
         return Ok(Some(DownloadedFile::new(entry_path, size)));
     }
 
@@ -191,7 +195,9 @@ fn get_pdb_id_from_symsrvs(
     }
 
     let mut pe_path = format_symcache_path(sympath, pe_id);
-    let kind = if !pe_path.exists() {
+    let kind = if pe_path.exists() {
+        PeLocationKind::LocalCache
+    } else {
         // We didn't find a PE on disk, so last resort is to try to download it.
         let Some(downloaded) = download_from_symsrv(symsrvs, sympath, pe_id)? else {
             debug!("did not find {pe_id} on any symbol server");
@@ -201,16 +207,14 @@ fn get_pdb_id_from_symsrvs(
         pe_path = downloaded.path;
 
         PeLocationKind::Download(downloaded.size)
-    } else {
-        PeLocationKind::LocalCache
     };
 
-    debug!("trying to parse {pe_path:?} from disk..");
+    debug!("trying to parse {} from disk..", pe_path.display());
     let mut addr_space = FileAddrSpace::new(pe_path)?;
     let pe_file = Pe::new(&mut addr_space, 0)?;
     let pdb_id = pe_file.read_pdbid(&mut addr_space)?;
 
-    debug!("PDB id parsed from the PE: {:?}", pdb_id);
+    debug!("PDB id parsed from the PE: {pdb_id:?}");
 
     Ok(Some(PeLocation::new(kind, pdb_id)))
 }
@@ -255,7 +259,7 @@ fn get_pdb(
 
 /// A simple 'hasher' that uses the input bytes as a hash.
 ///
-/// This is used for the cache HashMap used in the [`Symbolizer`]. We are
+/// This is used for the cache `HashMap` used in the [`Symbolizer`]. We are
 /// caching symbol addresses and so we know those addresses are unique and do
 /// not need to be hashed.
 #[derive(Default)]
@@ -331,6 +335,7 @@ pub struct Symbolizer {
 }
 
 impl Symbolizer {
+    #[must_use]
     pub fn builder() -> Builder<NoSymcache> {
         Builder::default()
     }
@@ -357,16 +362,19 @@ impl Symbolizer {
         };
 
         if !config.symcache.is_dir() {
-            return Err(anyhow!("{:?} directory does not exist", config.symcache))?;
+            return Err(anyhow!(
+                "{} directory does not exist",
+                config.symcache.display()
+            ))?;
         }
 
         Ok(Self {
-            stats: Default::default(),
+            stats: StatsBuilder::default(),
             symcache: config.symcache,
             modules: Modules::new(config.modules),
             symsrvs,
-            addr_cache: Default::default(),
-            pdb_caches: Default::default(),
+            addr_cache: RefCell::default(),
+            pdb_caches: RefCell::default(),
             offline,
         })
     }
@@ -452,7 +460,7 @@ impl Symbolizer {
                 get_pdb(&self.symcache, &self.symsrvs, &pdb_id, self.offline)?
             {
                 if let PdbLocationKind::Download(size) = downloaded_pdb.kind {
-                    self.stats.downloaded_pdb(pdb_id, size)
+                    self.stats.downloaded_pdb(pdb_id, size);
                 }
 
                 // .. and ingest it if we have one.
@@ -503,7 +511,7 @@ impl Symbolizer {
 
                 v.insert(symbol);
             }
-        };
+        }
 
         Ok(self.addr_cache.borrow().get(&addr).cloned())
     }

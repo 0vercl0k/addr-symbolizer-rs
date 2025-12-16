@@ -1,4 +1,5 @@
 // Axel '0vercl0k' Souchet - May 26th 2024
+#![allow(clippy::missing_panics_doc, clippy::missing_errors_doc)]
 #![doc = include_str!("../README.md")]
 mod addr_space;
 mod builder;

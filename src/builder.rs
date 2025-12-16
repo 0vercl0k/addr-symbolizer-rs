@@ -23,10 +23,12 @@ pub struct Builder<SC> {
 }
 
 impl<SC> Builder<SC> {
+    #[must_use]
     pub fn msft_symsrv(self) -> Builder<SC> {
         self.online(vec!["https://msdl.microsoft.com/download/symbols/"])
     }
 
+    #[must_use]
     pub fn online(mut self, symsrvs: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.mode = PdbLookupMode::Online {
             symsrvs: symsrvs.into_iter().map(Into::into).collect(),
@@ -40,7 +42,7 @@ impl Builder<NoSymcache> {
     pub fn symcache(self, cache: impl AsRef<Path>) -> Result<Builder<Symcache>> {
         let cache = cache.as_ref();
         if !(cache.is_dir() && cache.exists()) {
-            return Err(anyhow!("{cache:?} isn't a dir or doesn't exist").into());
+            return Err(anyhow!("{} isn't a dir or doesn't exist", cache.display()).into());
         }
 
         let Self { modules, mode, .. } = self;
@@ -54,6 +56,7 @@ impl Builder<NoSymcache> {
 }
 
 impl<SC> Builder<SC> {
+    #[must_use]
     pub fn modules(mut self, modules: impl IntoIterator<Item = Module>) -> Self {
         self.modules = modules.into_iter().collect();
 
@@ -67,7 +70,8 @@ impl Builder<Symcache> {
             let dir = dir.as_ref();
             if !(dir.exists() && dir.is_dir()) {
                 return Err(anyhow!(
-                    "cannot import pdb from {dir:?} as it doesn't exist or isn't a directory"
+                    "cannot import pdb from {} as it doesn't exist or isn't a directory",
+                    dir.display()
                 )
                 .into());
             }
@@ -75,22 +79,25 @@ impl Builder<Symcache> {
             for file in dir.read_dir()? {
                 let path = file?.path();
                 if !path.is_file() {
-                    debug!("skipping {path:?} because not a file");
+                    debug!("skipping {} because not a file", path.display());
                     continue;
                 }
 
                 let Some(ext) = path.extension() else {
-                    debug!("skipping {path:?} because doesn't have an extension");
+                    debug!(
+                        "skipping {} because doesn't have an extension",
+                        path.display()
+                    );
                     continue;
                 };
 
                 if ext != "pdb" {
-                    debug!("skipping {path:?} because not a pdb file");
+                    debug!("skipping {} because not a pdb file", path.display());
                     continue;
                 }
 
                 let Some(filename) = path.file_name() else {
-                    debug!("skipping {path:?} because no filename");
+                    debug!("skipping {} because no filename", path.display());
                     continue;
                 };
 
@@ -104,15 +111,22 @@ impl Builder<Symcache> {
                 let pdbid = PdbId::new(filename, Guid::from(info.guid.to_bytes_le()), age)?;
                 let cached_pdb = format_symcache_path(&self.symcache.0, &pdbid);
                 if cached_pdb.exists() {
-                    debug!("skipping {path:?} because already in symbol cache");
+                    debug!(
+                        "skipping {} because already in symbol cache",
+                        path.display()
+                    );
                     continue;
                 }
 
                 let Some(cached_pdb_dir) = cached_pdb.parent() else {
-                    return Err(anyhow!("{cached_pdb:?} has no parent").into());
+                    return Err(anyhow!("{} has no parent", cached_pdb.display()).into());
                 };
 
-                info!("copying {path:?} into the symbol cache at {cached_pdb:?}");
+                info!(
+                    "copying {} into the symbol cache at {}",
+                    path.display(),
+                    cached_pdb.display()
+                );
                 fs::create_dir_all(cached_pdb_dir)?;
                 fs::copy(path, cached_pdb)?;
             }
@@ -129,7 +143,7 @@ impl Builder<Symcache> {
         } = self;
 
         if !symcache.0.exists() {
-            return Err(anyhow!("symcache {:?} does not exist", symcache.0).into());
+            return Err(anyhow!("symcache {} does not exist", symcache.0.display()).into());
         }
 
         let config = Config {

@@ -28,14 +28,17 @@ pub struct Stats {
 }
 
 impl Stats {
-    pub fn did_download_pdb(&self, pdb_id: PdbId) -> bool {
-        self.pdb_downloaded.contains_key(&pdb_id)
+    #[must_use]
+    pub fn did_download_pdb(&self, pdb_id: &PdbId) -> bool {
+        self.pdb_downloaded.contains_key(pdb_id)
     }
 
-    pub fn did_download_pe(&self, pe_id: PeId) -> bool {
-        self.pe_downloaded.contains_key(&pe_id)
+    #[must_use]
+    pub fn did_download_pe(&self, pe_id: &PeId) -> bool {
+        self.pe_downloaded.contains_key(pe_id)
     }
 
+    #[must_use]
     pub fn amount_downloaded(&self) -> u64 {
         let mut total = 0u64;
         for value in self.pdb_downloaded.values() {
@@ -45,10 +48,12 @@ impl Stats {
         total
     }
 
+    #[must_use]
     pub fn amount_pdb_downloaded(&self) -> usize {
         self.pdb_downloaded.len()
     }
 
+    #[must_use]
     pub fn amount_pe_downloaded(&self) -> usize {
         self.pe_downloaded.len()
     }

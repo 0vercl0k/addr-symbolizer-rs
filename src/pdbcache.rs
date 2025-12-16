@@ -190,6 +190,7 @@ impl PdbCache {
     ///
     /// This pulls as much information as possible and use any private symbols
     /// if there were any.
+    #[expect(clippy::unnecessary_wraps)]
     pub fn symbolize(&self, rva: Rva) -> Result<String> {
         // Find the function in which this `rva` is in.
         let Some((func_rva, func_symbol)) = self.find_sym(rva) else {
@@ -330,24 +331,21 @@ impl<'module> PdbCacheBuilder<'module> {
             };
 
             let file_info = line_program.get_file_info(line.file_index)?;
-            let override_path = if main_path.is_none() {
+            let override_path = if let Some(main_path) = &main_path {
+                let new_path = file_info.name.to_string_lossy(string_table)?;
+                if main_path == &new_path {
+                    None
+                } else {
+                    Some(new_path.into_owned())
+                }
+            } else {
                 main_path = Some(file_info.name.to_string_lossy(string_table)?.into_owned());
 
                 None
-            } else {
-                let new_path = file_info.name.to_string_lossy(string_table)?;
-                if main_path.as_ref().unwrap() != &new_path {
-                    Some(new_path.into_owned())
-                } else {
-                    None
-                }
             };
 
             if line_rva < proc_rva {
-                warn!(
-                    "symbol {} has confusing line information, skipping",
-                    proc_name
-                );
+                warn!("symbol {proc_name} has confusing line information, skipping");
                 return Ok(());
             }
 
@@ -417,10 +415,7 @@ impl<'module> PdbCacheBuilder<'module> {
 
         // Get the RVA..
         let pdb2::Rva(rva) = offset.to_rva(address_map).ok_or_else(|| {
-            anyhow!(
-                "failed to get rva from symbol {undecorated_name} / {:?}, skipping",
-                offset
-            )
+            anyhow!("failed to get rva from symbol {undecorated_name} / {offset:?}, skipping")
         })?;
 
         //.. and build an entry for this function.
@@ -459,7 +454,7 @@ impl<'module> PdbCacheBuilder<'module> {
                 )?;
             }
             _ => {}
-        };
+        }
 
         Ok(())
     }
@@ -519,12 +514,12 @@ impl<'module> PdbCacheBuilder<'module> {
     pub fn ingest_pdb(&mut self, pdb_path: impl AsRef<Path>) -> Result<()> {
         // Open the PDB file.
         let pdb_path = pdb_path.as_ref();
-        let pdb_file =
-            File::open(pdb_path).with_context(|| format!("failed to open pdb {pdb_path:?}"))?;
-        let mut pdb =
-            Pdb::open(pdb_file).with_context(|| format!("failed to parse pdb {pdb_path:?}"))?;
+        let pdb_file = File::open(pdb_path)
+            .with_context(|| format!("failed to open pdb {}", pdb_path.display()))?;
+        let mut pdb = Pdb::open(pdb_file)
+            .with_context(|| format!("failed to parse pdb {}", pdb_path.display()))?;
 
-        trace!("ingesting {pdb_path:?}..");
+        trace!("ingesting {}..", pdb_path.display());
 
         let address_map = pdb.address_map()?;
         // Parse and extract all the bits we need from the private symbols first. We do

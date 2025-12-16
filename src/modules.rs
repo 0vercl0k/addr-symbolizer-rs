@@ -24,6 +24,8 @@ impl Module {
     }
 
     /// Calculate an rva from an `addr` contained in this module.
+    #[expect(clippy::cast_possible_truncation)]
+    #[must_use]
     pub fn rva(&self, addr: u64) -> Rva {
         debug_assert!(self.at.contains(&addr));
 
@@ -40,6 +42,7 @@ pub struct Modules(Vec<Module>);
 
 impl Modules {
     /// Create a [`Modules`].
+    #[must_use]
     pub fn new(mut modules: Vec<Module>) -> Self {
         // Order the modules by their end addresses.
         modules.sort_unstable_by_key(|e| e.at.end);
@@ -48,6 +51,7 @@ impl Modules {
     }
 
     /// Find the module that contains this address.
+    #[must_use]
     pub fn find(&self, addr: u64) -> Option<&Module> {
         // Find the index of the first module that might contain `addr`.
         let idx = self.0.partition_point(|m| m.at.end <= addr);

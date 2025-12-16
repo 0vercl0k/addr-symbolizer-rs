@@ -7,20 +7,20 @@ pub trait AddrSpace {
     fn read_exact_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<()> {
         let size = self.read_at(addr, buf)?;
 
-        if size != buf.len() {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("could read only {size} bytes instead of {}", buf.len()),
-            ))
-        } else {
+        if size == buf.len() {
             Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "could read only {size} bytes instead of {}",
+                buf.len()
+            )))
         }
     }
 
     fn try_read_exact_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<()>> {
         let size = self.read_at(addr, buf)?;
 
-        Ok(if size != buf.len() { None } else { Some(()) })
+        Ok(if size == buf.len() { Some(()) } else { None })
     }
 }
 

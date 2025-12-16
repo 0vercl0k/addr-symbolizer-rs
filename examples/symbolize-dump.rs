@@ -38,10 +38,10 @@ fn sympath() -> Option<PathBuf> {
     }
 }
 
-fn user(dmp: UserDumpParser, addr: u64) -> Result<()> {
+fn user(dmp: &UserDumpParser, addr: u64) -> Result<()> {
     #[derive(Debug)]
-    struct UserDumpAddrSpace<'dmp>(UserDumpParser<'dmp>);
-    impl<'dmp> AddrSpace for UserDumpAddrSpace<'dmp> {
+    struct UserDumpAddrSpace<'dmp>(&'dmp UserDumpParser<'dmp>);
+    impl AddrSpace for UserDumpAddrSpace<'_> {
         fn read_at(&mut self, addr: u64, mut buf: &mut [u8]) -> io::Result<usize> {
             let mut cur_addr = addr;
             let mut read_len = 0;
@@ -94,12 +94,12 @@ fn user(dmp: UserDumpParser, addr: u64) -> Result<()> {
     Ok(())
 }
 
-fn kernel(dmp: KernelDumpParser, addr: u64) -> Result<()> {
+fn kernel(dmp: &KernelDumpParser, addr: u64) -> Result<()> {
     #[derive(Debug)]
     struct KernelDumpAdrSpace<'dmp>(&'dmp KernelDumpParser);
-    impl<'dmp> AddrSpace for KernelDumpAdrSpace<'dmp> {
+    impl AddrSpace for KernelDumpAdrSpace<'_> {
         fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
-            virt::Reader::new(&self.0)
+            virt::Reader::new(self.0)
                 .read(addr.into(), buf)
                 .map_err(|e| io::Error::new(io::ErrorKind::Unsupported, e))
         }
@@ -115,7 +115,7 @@ fn kernel(dmp: KernelDumpParser, addr: u64) -> Result<()> {
         ));
     }
 
-    let mut wrapper = KernelDumpAdrSpace(&dmp);
+    let mut wrapper = KernelDumpAdrSpace(dmp);
     let mut symb = Builder::default()
         .modules(modules)
         .msft_symsrv()
@@ -143,8 +143,8 @@ fn main() -> Result<()> {
     // Parse the CLI arguments.
     let args = CliArgs::parse();
     match args {
-        CliArgs::User { dump, addr } => user(UserDumpParser::new(dump)?, hex(&addr)?),
-        CliArgs::Kernel { dump, addr } => kernel(KernelDumpParser::new(dump)?, hex(&addr)?),
+        CliArgs::User { dump, addr } => user(&UserDumpParser::new(dump)?, hex(&addr)?),
+        CliArgs::Kernel { dump, addr } => kernel(&KernelDumpParser::new(dump)?, hex(&addr)?),
     }?;
 
     Ok(())
