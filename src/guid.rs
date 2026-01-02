@@ -3,8 +3,6 @@
 use std::fmt::Display;
 use std::str::FromStr;
 
-use anyhow::anyhow;
-
 use crate::Error;
 
 /// A GUID.
@@ -21,7 +19,9 @@ impl FromStr for Guid {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.len() != 32 {
-            return Err(anyhow!("the guid str ({s:?}) should be 32 bytes long").into());
+            return Err(Error::Other(format!(
+                "the guid str ({s:?}) should be 32 bytes long"
+            )));
         }
 
         let mut bytes = [0; 16];
@@ -76,7 +76,7 @@ mod tests {
     use crate::Guid;
 
     const NTDLL_GUID: Guid = Guid {
-        d0: 0x8d5d5ed5,
+        d0: 0x8d5d_5ed5,
         d1: 0xd5b8,
         d2: 0xaa60,
         d3: [0x9a, 0x82, 0x60, 0x0c, 0x14, 0xe3, 0x00, 0x4d],
@@ -103,7 +103,7 @@ mod tests {
         assert_eq!(
             "8D5D5ED5D5B8AA609A82600C14E3004D".parse::<Guid>().unwrap(),
             NTDLL_GUID
-        )
+        );
     }
 
     #[test]
@@ -140,6 +140,6 @@ mod tests {
                 0x00, 0x4d
             ]),
             NTDLL_GUID
-        )
+        );
     }
 }

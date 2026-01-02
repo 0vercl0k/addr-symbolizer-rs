@@ -8,7 +8,7 @@ use std::thread;
 
 use addr_symbolizer::{AddrSpace, Builder, Module, PdbId, PeId};
 use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile};
-use object::{pe, ReadCache, ReadRef};
+use object::{ReadCache, ReadRef, pe};
 // use udmp_parser::UserDumpParser;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -63,7 +63,7 @@ const PRIVATE_FUNCTION: Entry = Entry::new(
 );
 
 const SLIGHTLY_OOB: Entry = Entry::new(EXPECTED_LEN, "0x0000000000009000", "0x0000000000009000");
-const COMPLETELY_OOB: Entry = Entry::new(0xdeadbeef, "0x00000000deadbeef", "0x00000000deadbeef");
+const COMPLETELY_OOB: Entry = Entry::new(0xdead_beef, "0x00000000deadbeef", "0x00000000deadbeef");
 
 const EXPECTED_RAW: [&Entry; 4] = [
     &EXPORTED_FUNCTION,
@@ -139,10 +139,6 @@ impl AddrSpace for RawAddressSpace {
 
         Read::read(&mut self.raw, buf)
     }
-
-    fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> std::io::Result<Option<usize>> {
-        self.read_at(addr, buf).map(Some)
-    }
 }
 
 #[test]
@@ -169,7 +165,7 @@ fn raw_virt() -> Result<()> {
 
     let stats = symb.stats();
     assert_eq!(stats.amount_pdb_downloaded(), 1);
-    assert!(stats.did_download_pdb(PdbId::new(
+    assert!(stats.did_download_pdb(&PdbId::new(
         "clrhost.pdb",
         "59E5C589F2149783C04A42F26DA1CC23".parse().unwrap(),
         1
@@ -257,7 +253,7 @@ where
     }
 }
 
-impl<'data, P> AddrSpace for FileAddressSpace<'data, P>
+impl<P> AddrSpace for FileAddressSpace<'_, P>
 where
     P: ImageNtHeaders,
 {
@@ -279,14 +275,10 @@ where
                 .pe
                 .data()
                 .read_slice_at(addr, buf.len())
-                .map_err(|_| io::Error::new(io::ErrorKind::Unsupported, "read_slice_at"))?,
+                .map_err(|()| io::Error::new(io::ErrorKind::Unsupported, "read_slice_at"))?,
         };
 
         buf.write(data)
-    }
-
-    fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> std::io::Result<Option<usize>> {
-        self.read_at(addr, buf).map(Some)
     }
 }
 
@@ -319,7 +311,7 @@ fn raw_file() -> Result<()> {
 
     let stats = symb.stats();
     assert_eq!(stats.amount_pdb_downloaded(), 1);
-    assert!(stats.did_download_pdb(PdbId::new(
+    assert!(stats.did_download_pdb(&PdbId::new(
         "clrhost.pdb",
         "59E5C589F2149783C04A42F26DA1CC23".parse()?,
         1
@@ -354,7 +346,7 @@ fn raw_file32() -> Result<()> {
 
     let stats = symb.stats();
     assert_eq!(stats.amount_pdb_downloaded(), 1);
-    assert!(stats.did_download_pdb(PdbId::new(
+    assert!(stats.did_download_pdb(&PdbId::new(
         "clrhost.pdb",
         "FBB5EFC8A8DF311BCC600A47A42E8B55".parse()?,
         1
@@ -373,20 +365,16 @@ impl FileAddrSpace {
 
 impl AddrSpace for FileAddrSpace {
     fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.seek(io::SeekFrom::Start(addr))?;
-
-        self.0.read(buf)
-    }
-
-    fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<usize>> {
         // 0:000> !dh clrhost
         // ...
         //     35D0 [      70] address [size] of Debug Directory
         if (0x35D0..(0x35D0 + 0x70)).contains(&addr) {
-            return Ok(None);
+            return Ok(0);
         }
 
-        self.read_at(addr, buf).map(Some)
+        self.0.seek(io::SeekFrom::Start(addr))?;
+
+        self.0.read(buf)
     }
 }
 
@@ -413,10 +401,10 @@ fn download_pe() -> Result<()> {
     // 7D1F08C1 time date stamp Tue Jul  8 20:10:57 2036
     // ...
     //     9000 size of image
-    assert!(stats.did_download_pe(PeId::new("clrhost.dll", 0x7D1F08C1, 0x9000)));
+    assert!(stats.did_download_pe(&PeId::new("clrhost.dll", 0x7D1F_08C1, 0x9000)));
 
     assert_eq!(stats.amount_pdb_downloaded(), 1);
-    assert!(stats.did_download_pdb(PdbId::new(
+    assert!(stats.did_download_pdb(&PdbId::new(
         "clrhost.pdb",
         "59E5C589F2149783C04A42F26DA1CC23".parse()?,
         1

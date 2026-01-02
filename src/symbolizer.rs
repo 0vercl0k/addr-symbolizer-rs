@@ -2,7 +2,7 @@
 //! This module contains the implementation of the [`Symbolizer`] which is the
 //! object that is able to symbolize files using PDB information if available.
 use std::cell::RefCell;
-use std::collections::{hash_map, HashMap};
+use std::collections::{HashMap, hash_map};
 use std::fs::{self, File};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{self, BufWriter, Read, Seek, Write};
@@ -10,17 +10,16 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use anyhow::{anyhow, Context};
 use log::{debug, trace, warn};
 
 use crate::addr_space::AddrSpace;
 use crate::builder::{Builder, NoSymcache};
 use crate::misc::{fast_hex32, fast_hex64};
 use crate::modules::{Module, Modules};
-use crate::pdbcache::{format_symcache_path, format_symsrv_url, PdbCache, PdbCacheBuilder};
+use crate::pdbcache::{PdbCache, PdbCacheBuilder, format_symcache_path, format_symsrv_url};
 use crate::pe::{PdbId, Pe, PeId, SymcacheEntry};
 use crate::stats::{Stats, StatsBuilder};
-use crate::{Error as E, Result};
+use crate::{Error, Error as E, Result};
 
 #[derive(Debug)]
 struct DownloadedFile {
@@ -103,12 +102,6 @@ impl AddrSpace for FileAddrSpace {
 
         self.0.read(buf)
     }
-
-    fn try_read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<Option<usize>> {
-        self.0.seek(io::SeekFrom::Start(addr))?;
-
-        Ok(self.0.read(buf).map(Some).unwrap_or(None))
-    }
 }
 
 /// Attempt to download a PE/PDB file from a list of symbol servers.
@@ -141,7 +134,7 @@ fn download_from_symsrv(
             Ok(o) => o,
             // If we get a 404, it means that the server doesn't know about this file. So we'll skip
             // to the next symbol server.
-            Err(ureq::Error::Status(404, ..)) => {
+            Err(ureq::Error::StatusCode(404)) => {
                 warn!("got a 404 for {entry_url}");
                 continue;
             }
@@ -157,24 +150,32 @@ fn download_from_symsrv(
         // If the server knows about this file, it is time to create the directory
         // structure in which we'll download the file into.
         if !entry_root_dir.try_exists()? {
-            debug!("creating {entry_root_dir:?}..");
-            fs::create_dir(&entry_root_dir)
-                .with_context(|| format!("failed to create base PE/PDB dir {entry_root_dir:?}"))?;
+            debug!("creating {}..", entry_root_dir.display());
+            fs::create_dir(&entry_root_dir).map_err(|_| {
+                Error::Other(format!(
+                    "failed to create base PE/PDB dir {}",
+                    entry_root_dir.display()
+                ))
+            })?;
         }
 
         if !entry_dir.try_exists()? {
-            debug!("creating {entry_dir:?}..");
-            fs::create_dir(&entry_dir)
-                .with_context(|| format!("failed to create pdb dir {entry_dir:?}"))?;
+            debug!("creating {}..", entry_dir.display());
+            fs::create_dir(&entry_dir).map_err(|_| {
+                Error::Other(format!("failed to create pdb dir {}", entry_dir.display()))
+            })?;
         }
 
         // Finally, we can download and save the file.
         let file = File::create(&entry_path)
-            .with_context(|| format!("failed to create {entry_path:?}"))?;
+            .map_err(|_| Error::Other(format!("failed to create {}", entry_path.display())))?;
 
-        let size = io::copy(&mut resp.into_reader(), &mut BufWriter::new(file))?;
+        let size = io::copy(
+            &mut resp.into_body().into_reader(),
+            &mut BufWriter::new(file),
+        )?;
 
-        debug!("downloaded to {entry_path:?}");
+        debug!("downloaded to {}", entry_path.display());
         return Ok(Some(DownloadedFile::new(entry_path, size)));
     }
 
@@ -194,7 +195,9 @@ fn get_pdb_id_from_symsrvs(
     }
 
     let mut pe_path = format_symcache_path(sympath, pe_id);
-    let kind = if !pe_path.exists() {
+    let kind = if pe_path.exists() {
+        PeLocationKind::LocalCache
+    } else {
         // We didn't find a PE on disk, so last resort is to try to download it.
         let Some(downloaded) = download_from_symsrv(symsrvs, sympath, pe_id)? else {
             debug!("did not find {pe_id} on any symbol server");
@@ -204,16 +207,14 @@ fn get_pdb_id_from_symsrvs(
         pe_path = downloaded.path;
 
         PeLocationKind::Download(downloaded.size)
-    } else {
-        PeLocationKind::LocalCache
     };
 
-    debug!("trying to parse {pe_path:?} from disk..");
+    debug!("trying to parse {} from disk..", pe_path.display());
     let mut addr_space = FileAddrSpace::new(pe_path)?;
     let pe_file = Pe::new(&mut addr_space, 0)?;
     let pdb_id = pe_file.read_pdbid(&mut addr_space)?;
 
-    debug!("PDB id parsed from the PE: {:?}", pdb_id);
+    debug!("PDB id parsed from the PE: {pdb_id:?}");
 
     Ok(Some(PeLocation::new(kind, pdb_id)))
 }
@@ -258,7 +259,7 @@ fn get_pdb(
 
 /// A simple 'hasher' that uses the input bytes as a hash.
 ///
-/// This is used for the cache HashMap used in the [`Symbolizer`]. We are
+/// This is used for the cache `HashMap` used in the [`Symbolizer`]. We are
 /// caching symbol addresses and so we know those addresses are unique and do
 /// not need to be hashed.
 #[derive(Default)]
@@ -334,6 +335,7 @@ pub struct Symbolizer {
 }
 
 impl Symbolizer {
+    #[must_use]
     pub fn builder() -> Builder<NoSymcache> {
         Builder::default()
     }
@@ -360,16 +362,19 @@ impl Symbolizer {
         };
 
         if !config.symcache.is_dir() {
-            return Err(anyhow!("{:?} directory does not exist", config.symcache))?;
+            return Err(Error::Other(format!(
+                "{} directory does not exist",
+                config.symcache.display()
+            )))?;
         }
 
         Ok(Self {
-            stats: Default::default(),
+            stats: StatsBuilder::default(),
             symcache: config.symcache,
             modules: Modules::new(config.modules),
             symsrvs,
-            addr_cache: Default::default(),
-            pdb_caches: Default::default(),
+            addr_cache: RefCell::default(),
+            pdb_caches: RefCell::default(),
             offline,
         })
     }
@@ -455,7 +460,7 @@ impl Symbolizer {
                 get_pdb(&self.symcache, &self.symsrvs, &pdb_id, self.offline)?
             {
                 if let PdbLocationKind::Download(size) = downloaded_pdb.kind {
-                    self.stats.downloaded_pdb(pdb_id, size)
+                    self.stats.downloaded_pdb(pdb_id, size);
                 }
 
                 // .. and ingest it if we have one.
@@ -470,15 +475,16 @@ impl Symbolizer {
         // .. symbolize `addr`..
         let line = pdbcache
             .symbolize(module.rva(addr))
-            .with_context(|| format!("failed to symbolize {addr:#x}"))?;
+            .map_err(|_| Error::Other(format!("failed to symbolize {addr:#x}")))?;
 
         // .. and store the sym cache to be used for next time we need to symbolize an
         // address from this module.
-        assert!(self
-            .pdb_caches
-            .borrow_mut()
-            .insert(module.at.clone(), Rc::new(pdbcache))
-            .is_none());
+        assert!(
+            self.pdb_caches
+                .borrow_mut()
+                .insert(module.at.clone(), Rc::new(pdbcache))
+                .is_none()
+        );
 
         Ok(Some(Rc::new(line)))
     }
@@ -505,7 +511,7 @@ impl Symbolizer {
 
                 v.insert(symbol);
             }
-        };
+        }
 
         Ok(self.addr_cache.borrow().get(&addr).cloned())
     }
@@ -527,7 +533,7 @@ impl Symbolizer {
 
             output.write_all(fast_hex64(&mut buffer, addr))
         }
-        .context("failed to write symbolized value to output")?;
+        .map_err(|_| Error::Other("failed to write symbolized value to output".to_string()))?;
 
         self.stats.addr_symbolized();
 
@@ -544,9 +550,9 @@ impl Symbolizer {
     ) -> Result<()> {
         match self.try_symbolize_addr(addr_space, addr)? {
             Some(sym) => {
-                output
-                    .write_all(sym.as_bytes())
-                    .context("failed to write symbolized value to output")?;
+                output.write_all(sym.as_bytes()).map_err(|_| {
+                    Error::Other("failed to write symbolized value to output".to_string())
+                })?;
 
                 self.stats.addr_symbolized();
                 Ok(())
