@@ -19,7 +19,7 @@ ureq = { version = "3.1", default-features = false, features = ["rustls", "gzip"
 thiserror = "2.0"
 
 [dev-dependencies]
-kdmp-parser = { git = "https://github.com/0vercl0k/kdmp-parser-rs.git", branch = "fbl_pedantic" }
+kdmp-parser = "0.8"
 udmp-parser = "0.2"
 object = { version = "0.38.0", default-features = false, features = [
     "read",
