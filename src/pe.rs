@@ -539,8 +539,8 @@ impl Pe {
 
         let amount = addr_space.read_at(file_name_addr, &mut file_name)?;
         if amount == 0 {
-            // XXX:
-            return Err(Error::Other("failed to read file_name".to_string()));
+            debug!("failed to read the filename @ {file_name_addr:#x} because of mem translation");
+            return Ok(None);
         }
 
         // The last character is supposed to be a NULL byte, bail if it's not there.
