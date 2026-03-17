@@ -1,25 +1,23 @@
 // Axel '0vercl0k' Souchet - February 20 2024
 //! This module contains the implementation of the [`Symbolizer`] which is the
 //! object that is able to symbolize files using PDB information if available.
-use std::cell::RefCell;
-use std::collections::{HashMap, hash_map};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{self, BufWriter, Read, Seek, Write};
-use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 use log::{debug, trace, warn};
 
 use crate::addr_space::AddrSpace;
-use crate::builder::{Builder, NoSymcache};
-use crate::misc::{fast_hex32, fast_hex64};
+use crate::misc::{fast_hex32, fast_hex64, parse_full_name};
 use crate::modules::{Module, Modules};
-use crate::pdbcache::{PdbCache, PdbCacheBuilder, format_symcache_path, format_symsrv_url};
+use crate::pdbcache::{
+    PdbCache, PdbCacheBuilder, PdbCacheStore, format_symcache_path, format_symsrv_url,
+};
 use crate::pe::{PdbId, Pe, PeId, SymcacheEntry};
-use crate::stats::{Stats, StatsBuilder};
-use crate::{Error, Error as E, Result};
+use crate::stats::Stats;
+use crate::{Error, Result};
 
 #[derive(Debug)]
 struct DownloadedFile {
@@ -88,36 +86,20 @@ impl PeLocation {
     }
 }
 
-struct FileAddrSpace(File);
-
-impl FileAddrSpace {
-    fn new(path: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self(File::open(path.as_ref())?))
-    }
-}
-
-impl AddrSpace for FileAddrSpace {
-    fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.seek(io::SeekFrom::Start(addr))?;
-
-        self.0.read(buf)
-    }
-}
-
 /// Attempt to download a PE/PDB file from a list of symbol servers.
 ///
 /// The code iterates through every symbol servers, and stops as soon as it was
 /// able to download a matching file.
-fn download_from_symsrv(
-    symsrvs: &Vec<String>,
-    sympath_dir: impl AsRef<Path>,
+fn download_from_symsrv<'s>(
+    symcache: impl AsRef<Path>,
+    symsrvs: impl Iterator<Item = &'s str>,
     entry: &impl SymcacheEntry,
 ) -> Result<Option<DownloadedFile>> {
     // Give a try to each of the symbol servers.
     for symsrv in symsrvs {
         // The way a symbol path is structured is that there is a directory per module..
-        let sympath_dir = sympath_dir.as_ref();
-        let entry_root_dir = sympath_dir.join(entry.name());
+        let symcache = symcache.as_ref();
+        let entry_root_dir = symcache.join(entry.name());
 
         // ..and inside, there is a directory per version of the PE/PDB..
         let entry_dir = entry_root_dir.join(entry.index());
@@ -140,7 +122,7 @@ fn download_from_symsrv(
             }
             // If we received any other errors, well that's not expected so let's bail.
             Err(e) => {
-                return Err(E::Download {
+                return Err(Error::Download {
                     entry_url,
                     e: e.into(),
                 });
@@ -185,47 +167,62 @@ fn download_from_symsrv(
 /// Try to download a PE file off the symbol servers, and if one is found, try
 /// to extract its PDB identifier.
 fn get_pdb_id_from_symsrvs(
-    sympath: &Path,
-    symsrvs: &Vec<String>,
+    pdb_lookup: &PdbLookupConfig,
     pe_id: &PeId,
-    offline: bool,
 ) -> Result<Option<PeLocation>> {
-    if offline {
-        return Ok(None);
-    }
+    Ok(match pdb_lookup.symsrvs() {
+        None => {
+            // If we're offline, we're done.
+            None
+        }
 
-    let mut pe_path = format_symcache_path(sympath, pe_id);
-    let kind = if pe_path.exists() {
-        PeLocationKind::LocalCache
-    } else {
-        // We didn't find a PE on disk, so last resort is to try to download it.
-        let Some(downloaded) = download_from_symsrv(symsrvs, sympath, pe_id)? else {
-            debug!("did not find {pe_id} on any symbol server");
-            return Ok(None);
-        };
+        Some(symsrvs) => {
+            struct FileAddrSpace(File);
 
-        pe_path = downloaded.path;
+            impl FileAddrSpace {
+                fn new(path: impl AsRef<Path>) -> Result<Self> {
+                    Ok(Self(File::open(path.as_ref())?))
+                }
+            }
 
-        PeLocationKind::Download(downloaded.size)
-    };
+            impl AddrSpace for FileAddrSpace {
+                fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
+                    self.0.seek(io::SeekFrom::Start(addr))?;
 
-    debug!("trying to parse {} from disk..", pe_path.display());
-    let mut addr_space = FileAddrSpace::new(pe_path)?;
-    let pe_file = Pe::new(&mut addr_space, 0)?;
-    let pdb_id = pe_file.read_pdbid(&mut addr_space)?;
+                    self.0.read(buf)
+                }
+            }
 
-    debug!("PDB id parsed from the PE: {pdb_id:?}");
+            let symcache = &pdb_lookup.symcache;
+            let mut pe_path = format_symcache_path(symcache, pe_id);
+            let kind = if pe_path.exists() {
+                PeLocationKind::LocalCache
+            } else {
+                // We didn't find a PE on disk, so last resort is to try to download it.
+                let Some(downloaded) = download_from_symsrv(symcache, symsrvs, pe_id)? else {
+                    debug!("did not find {pe_id} on any symbol server");
+                    return Ok(None);
+                };
 
-    Ok(Some(PeLocation::new(kind, pdb_id)))
+                pe_path = downloaded.path;
+
+                PeLocationKind::Download(downloaded.size)
+            };
+
+            debug!("trying to parse {} from disk..", pe_path.display());
+            let mut addr_space = FileAddrSpace::new(pe_path)?;
+            let pe_file = Pe::new(&mut addr_space, 0)?;
+            let pdb_id = pe_file.read_pdbid(&mut addr_space)?;
+
+            debug!("PDB id parsed from the PE: {pdb_id:?}");
+
+            Some(PeLocation::new(kind, pdb_id))
+        }
+    })
 }
 
 /// Try to find a PDB file online or locally from a [`PdbId`].
-fn get_pdb(
-    sympath: &Path,
-    symsrvs: &Vec<String>,
-    pdb_id: &PdbId,
-    offline: bool,
-) -> Result<Option<PdbLocation>> {
+fn get_pdb(pdb_lookup: &PdbLookupConfig, pdb_id: &PdbId) -> Result<Option<PdbLocation>> {
     // Let's see if the path exists locally..
     if pdb_id.path.is_file() {
         // .. if it does, this is a 'Local' PDB.
@@ -236,7 +233,8 @@ fn get_pdb(
     }
 
     // Now, let's see if it's in the local cache..
-    let local_path = format_symcache_path(sympath, pdb_id);
+    let symcache = &pdb_lookup.symcache;
+    let local_path = format_symcache_path(symcache, pdb_id);
     if local_path.is_file() {
         // .. if it does, this is a 'LocalCache' PDB.
         return Ok(Some(PdbLocation::new(
@@ -245,16 +243,19 @@ fn get_pdb(
         )));
     }
 
-    // If we're offline, let's just skip the downloading part.
-    if offline {
-        return Ok(None);
-    }
+    Ok(match pdb_lookup.symsrvs() {
+        None => {
+            // If we're offline, let's just skip the downloading part.
+            None
+        }
+        Some(symsrvs) => {
+            // We didn't find a PDB on disk, so last resort is to try to download it.
+            let downloaded_path = download_from_symsrv(symcache, symsrvs, pdb_id)?;
 
-    // We didn't find a PDB on disk, so last resort is to try to download it.
-    let downloaded_path = download_from_symsrv(symsrvs, sympath, pdb_id)?;
-
-    Ok(downloaded_path
-        .map(|file| PdbLocation::new(PdbLocationKind::Download(file.size), file.path)))
+            downloaded_path
+                .map(|file| PdbLocation::new(PdbLocationKind::Download(file.size), file.path))
+        }
+    })
 }
 
 /// A simple 'hasher' that uses the input bytes as a hash.
@@ -287,112 +288,86 @@ impl BuildHasher for IdentityHasher {
     }
 }
 
-#[derive(Debug, Default)]
-pub enum PdbLookupMode {
-    #[default]
-    Offline,
-    Online {
-        /// List of symbol servers to try to download PDBs from when needed.
-        symsrvs: Vec<String>,
-    },
+/// The logic in here has been extracted from the [`Symbolizer`] class to
+/// satisfy the borrow checker and avoid having free functions taking 5+
+/// arguments.
+struct SymbolizerInner<'symbolizer> {
+    stats: &'symbolizer mut Stats,
+    pdb_lookup: &'symbolizer PdbLookupConfig,
+    pdbcache_store: &'symbolizer mut PdbCacheStore,
 }
 
-/// Configuration for the [`Symbolizer`].
-#[derive(Debug)]
-pub struct Config {
-    /// Path to the local PDB symbol cache where PDBs will be
-    /// downloaded into, or where we'll look for cached PDBs.
-    pub symcache: PathBuf,
-    /// This is the list of kernel / user modules read from the kernel crash
-    /// dump.
-    pub modules: Vec<Module>,
-    /// Which mode are we using for PDB lookups? Online or Offline?
-    pub mode: PdbLookupMode,
-}
-
-/// The [`Symbolizer`] is the main object that glues all the logic.
-///
-/// It downloads, parses PDB information, and symbolizes.
-pub struct Symbolizer {
-    /// Keep track of some statistics such as the number of lines symbolized,
-    /// PDB downloaded, etc.
-    stats: StatsBuilder,
-    /// This is a path to the local PDB symbol cache where PDBs will be
-    /// downloaded into / where some are available.
-    symcache: PathBuf,
-    /// This is the list of kernel / user modules read from the kernel crash
-    /// dump.
-    modules: Modules,
-    /// List of symbol servers to try to download PDBs from when needed.
-    symsrvs: Vec<String>,
-    /// Caches addresses to symbols. This allows us to not have to symbolize an
-    /// address again.
-    addr_cache: RefCell<HashMap<u64, Rc<String>, IdentityHasher>>,
-    /// Each parsed module is stored in this cache. We parse PDBs, etc. only
-    /// once and then the [`PdbCache`] is used to query.
-    pdb_caches: RefCell<HashMap<Range<u64>, Rc<PdbCache>>>,
-    offline: bool,
-}
-
-impl Symbolizer {
-    #[must_use]
-    pub fn builder() -> Builder<NoSymcache> {
-        Builder::default()
+impl<'symbolizer> SymbolizerInner<'symbolizer> {
+    fn new(
+        stats: &'symbolizer mut Stats,
+        pdb_lookup: &'symbolizer PdbLookupConfig,
+        pdbcache_store: &'symbolizer mut PdbCacheStore,
+    ) -> Self {
+        Self {
+            stats,
+            pdb_lookup,
+            pdbcache_store,
+        }
     }
 
-    /// Create a [`Symbolizer`].
-    pub fn new(config: Config) -> Result<Self> {
-        let (offline, symsrvs) = match config.mode {
-            PdbLookupMode::Offline =>
-            // If the user wants offline, then let's do that..
-            {
-                (true, vec![])
-            }
-            PdbLookupMode::Online { symsrvs } => {
-                // ..otherwise, we'll try to resolve a DNS and see what happens. If we can't do
-                // that, then we'll assume we're offline and turn the offline mode.
-                // Otherwise, we'll assume we have online access and attempt to download PDBs.
-                let offline = ureq::get("https://www.google.com/").call().is_err();
-                if offline {
-                    debug!("Turning on 'offline' mode as you seem to not have internet access..");
+    fn get_or_create_module_pdbcache(
+        &'symbolizer mut self,
+        addr_space: &mut impl AddrSpace,
+        module: &Module,
+    ) -> Result<&'symbolizer PdbCache> {
+        let create_pdbcache = || -> Result<PdbCache> {
+            let mut builder = PdbCacheBuilder::new(module);
+
+            // Let's start by parsing the PE to get its exports, and PDB information if
+            // there's any.
+            let pe = Pe::new(addr_space, module.at.start)?;
+
+            // Ingest the EAT.
+            builder.ingest(pe.read_exports(addr_space)?.unwrap_or_default());
+
+            // See if it has PDB information. If it doesn't try to download the
+            // original PE file off symbol servers.
+            let pdb_id = pe.read_pdbid(addr_space).and_then(|pdb_id| {
+                if pdb_id.is_some() {
+                    return Ok(pdb_id);
                 }
 
-                (offline, symsrvs)
+                let pe_id = PeId::new(&module.name, pe.timestamp, pe.size);
+                trace!("No PDB information found, trying to download PE file for {pe_id}..");
+
+                let downloaded_pe = get_pdb_id_from_symsrvs(self.pdb_lookup, &pe_id)?;
+
+                Ok(downloaded_pe.and_then(|d| {
+                    if let PeLocationKind::Download(size) = d.kind {
+                        self.stats.downloaded_pe(pe_id, size);
+                    }
+
+                    d.pdb_id
+                }))
+            })?;
+
+            if let Some(pdb_id) = pdb_id {
+                trace!("getting PDB information for {module:?}/{pdb_id}..");
+
+                // Try to get a PDB..
+                if let Some(downloaded_pdb) = get_pdb(self.pdb_lookup, &pdb_id)? {
+                    if let PdbLocationKind::Download(size) = downloaded_pdb.kind {
+                        self.stats.downloaded_pdb(pdb_id, size);
+                    }
+
+                    // .. and ingest it if we have one.
+                    trace!("Ingesting PDB..");
+                    builder.ingest_pdb(downloaded_pdb.path)?;
+                }
             }
+
+            // Build the cache..
+            let pdbcache = builder.build()?;
+
+            Ok(pdbcache)
         };
 
-        if !config.symcache.is_dir() {
-            return Err(Error::Other(format!(
-                "{} directory does not exist",
-                config.symcache.display()
-            )))?;
-        }
-
-        Ok(Self {
-            stats: StatsBuilder::default(),
-            symcache: config.symcache,
-            modules: Modules::new(config.modules),
-            symsrvs,
-            addr_cache: RefCell::default(),
-            pdb_caches: RefCell::default(),
-            offline,
-        })
-    }
-
-    /// Get [`Stats`].
-    pub fn stats(&self) -> Stats {
-        self.stats.build()
-    }
-
-    /// Get the [`PdbCache`] for a specified `addr`.
-    fn module_pdbcache(&self, addr: u64) -> Option<Rc<PdbCache>> {
-        self.pdb_caches.borrow().iter().find_map(|(k, v)| {
-            if k.contains(&addr) {
-                Some(v.clone())
-            } else {
-                None
-            }
-        })
+        self.pdbcache_store.get_or_create(module, create_pdbcache)
     }
 
     /// Try to symbolize an address.
@@ -403,90 +378,118 @@ impl Symbolizer {
     /// Finally, the result will be kept around to symbolize addresses in that
     /// module faster in the future.
     fn try_symbolize_addr_from_pdbs(
-        &self,
+        &'symbolizer mut self,
         addr_space: &mut impl AddrSpace,
+        module: &Module,
         addr: u64,
-    ) -> Result<Option<Rc<String>>> {
-        trace!("symbolizing address {addr:#x}..");
-        let Some(module) = self.modules.find(addr) else {
-            trace!("address {addr:#x} doesn't belong to any module");
-            return Ok(None);
-        };
+    ) -> Result<Option<String>> {
+        trace!("symbolizing address {addr:#x} from {}..", module.name);
 
-        trace!("address {addr:#x} found in {}", module.name);
+        // Get a pdbcache..
+        let pdbcache = self.get_or_create_module_pdbcache(addr_space, module)?;
 
-        // Do we have a cache already ready to go?
-        if let Some(pdbcache) = self.module_pdbcache(addr) {
-            return Ok(Some(Rc::new(pdbcache.symbolize(module.rva(addr))?)));
+        // .. and symbolize `addr`!
+        let line = pdbcache.symbolize(module.rva(addr));
+
+        Ok(Some(line))
+    }
+}
+
+/// Holds the details of where PDBs can be looked up from; both locally and
+/// online if possible.
+#[derive(Debug)]
+pub struct PdbLookupConfig {
+    /// This is a path to the local PDB symbol cache where PDBs will be
+    /// downloaded into / where some are available.
+    symcache: PathBuf,
+    /// List of symbol servers to try to download PDBs from when needed.
+    symsrvs: Option<Vec<String>>,
+}
+
+impl PdbLookupConfig {
+    fn inner_new(symcache: PathBuf, symsrvs: Option<Vec<String>>) -> Result<Self> {
+        if !symcache.is_dir() {
+            return Err(Error::Other(format!(
+                "{} directory does not exist",
+                symcache.display()
+            )));
         }
 
-        // Otherwise, let's make one.
-        let mut builder = PdbCacheBuilder::new(module);
+        Ok(Self { symcache, symsrvs })
+    }
 
-        // Let's start by parsing the PE to get its exports, and PDB information if
-        // there's any.
-        let pe = Pe::new(addr_space, module.at.start)?;
+    pub fn new(symcache: PathBuf) -> Result<Self> {
+        Self::inner_new(symcache, None)
+    }
 
-        // Ingest the EAT.
-        builder.ingest(pe.read_exports(addr_space)?.unwrap_or_default());
+    pub fn with_msft_symsrv(symcache: PathBuf) -> Result<Self> {
+        Self::with_symsrvs(symcache, vec![
+            "https://msdl.microsoft.com/download/symbols/".to_string(),
+        ])
+    }
 
-        // See if it has PDB information. If it doesn't try to download the
-        // original PE file off symbol servers.
-        let pdb_id = pe.read_pdbid(addr_space).and_then(|pdb_id| {
-            if pdb_id.is_some() {
-                return Ok(pdb_id);
-            }
+    pub fn with_symsrvs(symcache: PathBuf, symsrvs: Vec<String>) -> Result<Self> {
+        Self::inner_new(symcache, Some(symsrvs))
+    }
 
-            let pe_id = PeId::new(&module.name, pe.timestamp, pe.size);
-            trace!("No PDB information found, trying to download PE file for {pe_id}..");
+    pub fn symcache(&self) -> &Path {
+        &self.symcache
+    }
 
-            let downloaded_pe =
-                get_pdb_id_from_symsrvs(&self.symcache, &self.symsrvs, &pe_id, self.offline)?;
+    pub fn is_offline(&self) -> bool {
+        self.symsrvs.is_none()
+    }
 
-            Ok(downloaded_pe.and_then(|d| {
-                if let PeLocationKind::Download(size) = d.kind {
-                    self.stats.downloaded_pe(pe_id, size);
-                }
+    pub fn is_online(&self) -> bool {
+        self.symsrvs.is_some()
+    }
 
-                d.pdb_id
-            }))
-        })?;
+    fn symsrvs(&self) -> Option<impl Iterator<Item = &str>> {
+        self.symsrvs
+            .as_ref()
+            .map(|symsrvs| symsrvs.iter().map(AsRef::as_ref))
+    }
+}
 
-        if let Some(pdb_id) = pdb_id {
-            trace!("getting PDB information for {module:?}/{pdb_id}..");
+/// The [`Symbolizer`] is the main object that glues all the logic.
+///
+/// It downloads, parses PDB information, and symbolizes.
+pub struct Symbolizer {
+    /// Keep track of some statistics such as the number of lines symbolized,
+    /// PDB downloaded, etc.
+    stats: Stats,
+    /// This is the list of kernel / user modules read from the kernel crash
+    /// dump.
+    modules: Modules,
+    /// List of symbol servers to try to download PDBs from when needed.
+    pdb_lookup: PdbLookupConfig,
+    /// Caches addresses to symbols. This allows us to not have to symbolize an
+    /// address again.
+    addr_cache: HashMap<u64, String, IdentityHasher>,
+    /// Each parsed module is stored in this cache. We parse PDBs, etc. only
+    /// once and then the [`PdbCache`] is used to query.
+    pdbcache_store: PdbCacheStore,
+}
 
-            // Try to get a PDB..
-            if let Some(downloaded_pdb) =
-                get_pdb(&self.symcache, &self.symsrvs, &pdb_id, self.offline)?
-            {
-                if let PdbLocationKind::Download(size) = downloaded_pdb.kind {
-                    self.stats.downloaded_pdb(pdb_id, size);
-                }
+impl Symbolizer {
+    /// Create a [`Symbolizer`].
+    #[must_use]
+    pub fn new(pdb_lookup: PdbLookupConfig, modules: impl IntoIterator<Item = Module>) -> Self {
+        let modules = modules.into_iter().collect();
 
-                // .. and ingest it if we have one.
-                trace!("Ingesting PDB..");
-                builder.ingest_pdb(downloaded_pdb.path)?;
-            }
+        Self {
+            stats: Stats::default(),
+            modules: Modules::new(modules),
+            pdb_lookup,
+            addr_cache: HashMap::default(),
+            pdbcache_store: PdbCacheStore::default(),
         }
+    }
 
-        // Build the cache..
-        let pdbcache = builder.build()?;
-
-        // .. symbolize `addr`..
-        let line = pdbcache
-            .symbolize(module.rva(addr))
-            .map_err(|_| Error::Other(format!("failed to symbolize {addr:#x}")))?;
-
-        // .. and store the sym cache to be used for next time we need to symbolize an
-        // address from this module.
-        assert!(
-            self.pdb_caches
-                .borrow_mut()
-                .insert(module.at.clone(), Rc::new(pdbcache))
-                .is_none()
-        );
-
-        Ok(Some(Rc::new(line)))
+    /// Get [`Stats`].
+    #[must_use]
+    pub fn stats(&self) -> &Stats {
+        &self.stats
     }
 
     /// Try to symbolize an address.
@@ -495,32 +498,44 @@ impl Symbolizer {
     /// `addr_cache` already. If not, we need to take the slow path and ask the
     /// right [`PdbCache`] which might require to create one in the first place.
     fn try_symbolize_addr(
-        &self,
+        &mut self,
         addr_space: &mut impl AddrSpace,
         addr: u64,
-    ) -> Result<Option<Rc<String>>> {
-        match self.addr_cache.borrow_mut().entry(addr) {
-            hash_map::Entry::Occupied(o) => {
+    ) -> Result<Option<&str>> {
+        use std::collections::hash_map::Entry::{Occupied, Vacant};
+        Ok(match self.addr_cache.entry(addr) {
+            Occupied(o) => {
                 self.stats.cache_hit();
-                return Ok(Some(o.get().clone()));
+
+                Some(o.into_mut())
             }
-            hash_map::Entry::Vacant(v) => {
-                let Some(symbol) = self.try_symbolize_addr_from_pdbs(addr_space, addr)? else {
+            Vacant(v) => {
+                let Some(module) = self.modules.by_addr(addr) else {
+                    trace!("address {addr:#x} doesn't belong to any module");
                     return Ok(None);
                 };
 
-                v.insert(symbol);
-            }
-        }
+                let mut inner = SymbolizerInner::new(
+                    &mut self.stats,
+                    &self.pdb_lookup,
+                    &mut self.pdbcache_store,
+                );
 
-        Ok(self.addr_cache.borrow().get(&addr).cloned())
+                let Some(symbol) = inner.try_symbolize_addr_from_pdbs(addr_space, module, addr)?
+                else {
+                    return Ok(None);
+                };
+
+                Some(v.insert(symbol))
+            }
+        })
     }
 
     /// Symbolize `addr` in the `module+offset` style and write the result into
     /// `output`.
-    pub fn modoff(&mut self, addr: u64, output: &mut impl Write) -> Result<()> {
+    pub fn symbolize_modoff(&mut self, addr: u64, output: &mut impl Write) -> Result<()> {
         let mut buffer = [0; 16];
-        if let Some(module) = self.modules.find(addr) {
+        if let Some(module) = self.modules.by_addr(addr) {
             output.write_all(module.name.as_bytes())?;
             output.write_all(b"+0x")?;
 
@@ -542,7 +557,7 @@ impl Symbolizer {
 
     /// Symbolize `addr` in the `module!function+offset` style and write the
     /// result into `output`.
-    pub fn full(
+    pub fn symbolize_full(
         &mut self,
         addr_space: &mut impl AddrSpace,
         addr: u64,
@@ -555,9 +570,34 @@ impl Symbolizer {
                 })?;
 
                 self.stats.addr_symbolized();
+
                 Ok(())
             }
-            None => self.modoff(addr, output),
+            None => self.symbolize_modoff(addr, output),
         }
+    }
+
+    /// XXX:
+    pub fn name_to_addr(
+        &mut self,
+        addr_space: &mut impl AddrSpace,
+        name: &str,
+    ) -> Result<Option<u64>> {
+        let Some(parsed_name) = parse_full_name(name) else {
+            return Err(Error::Other(format!("failed to parse {name}")));
+        };
+
+        let Some(module) = self.modules.by_name(parsed_name.module_name) else {
+            return Ok(None);
+        };
+
+        let mut inner =
+            SymbolizerInner::new(&mut self.stats, &self.pdb_lookup, &mut self.pdbcache_store);
+
+        let pdbcache = inner.get_or_create_module_pdbcache(addr_space, module)?;
+
+        Ok(pdbcache
+            .addr_by_name(parsed_name.function_name)
+            .map(|base_addr| u64::from(base_addr).strict_add(parsed_name.offset)))
     }
 }

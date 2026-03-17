@@ -4,7 +4,7 @@
 //! address. It extracts it out of a PDB file and doesn't require it to be
 //! around.
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::fs::File;
 use std::ops::Range;
@@ -18,6 +18,7 @@ use pdb2::{
 
 use crate::Error;
 use crate::error::Result;
+use crate::misc::{Rva, elyxir_of_life};
 use crate::modules::Module;
 use crate::pe::SymcacheEntry;
 
@@ -36,15 +37,15 @@ use crate::pe::SymcacheEntry;
 /// ^^^^^^^^^^^^^^^ ^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ^^^^^^^^
 ///   cache path    PDB name PDB GUID & PDB Age                PDB name
 /// ```
-pub fn format_symcache_path(symsrv_cache: &Path, entry: &impl SymcacheEntry) -> PathBuf {
-    symsrv_cache
+pub(crate) fn format_symcache_path(symcache: &Path, entry: &impl SymcacheEntry) -> PathBuf {
+    symcache
         .join(entry.name())
         .join(entry.index())
         .join(entry.name())
 }
 
 /// Format a URL to find a PE/PDB on an HTTP symbol server.
-pub fn format_symsrv_url(symsrv: &str, entry: &impl SymcacheEntry) -> String {
+pub(crate) fn format_symsrv_url(symsrv: &str, entry: &impl SymcacheEntry) -> String {
     format!(
         "{symsrv}/{}/{}/{}",
         entry.name(),
@@ -55,10 +56,6 @@ pub fn format_symsrv_url(symsrv: &str, entry: &impl SymcacheEntry) -> String {
 
 /// A PDB opened via file access.
 type Pdb<'p> = pdb2::PDB<'p, File>;
-/// A relative virtual address.
-type Rva = u32;
-/// A vector of lines.
-type Lines = Vec<Line>;
 
 /// A line of source code.
 ///
@@ -73,12 +70,14 @@ struct Line {
     /// Most lines in a function are part of the same file which is stored in
     /// the [`SourceInfo`] which contains the lines info. But in case, this line
     /// is stored in a different file, this is its path.
-    override_path: Option<String>,
+    override_path: Option<Box<str>>,
 }
 
 impl Line {
     /// Build a [`Line`].
     fn new(offset: Rva, number: u32, override_path: Option<String>) -> Self {
+        let override_path = override_path.map(String::into_boxed_str);
+
         Self {
             offset,
             number,
@@ -93,25 +92,32 @@ impl Line {
 /// offsets to line number.
 #[derive(Debug, Default)]
 struct SourceInfo {
-    path: String,
-    lines: Lines,
+    path: Box<str>,
+    lines: Box<[Line]>,
 }
 
 impl SourceInfo {
     /// Build a [`SourceInfo`].
-    fn new(path: String, lines: Lines) -> Self {
+    fn new(path: String, mut lines: Vec<Line>) -> Self {
         // We assume we have at least one entry in the vector.
         assert!(!lines.is_empty());
+        let path = path.into_boxed_str();
+
+        lines.sort_unstable_by_key(|line| line.offset);
+        let lines = lines.into_boxed_slice();
 
         Self { path, lines }
     }
 
     /// Find the line number associated to a raw offset from inside a function.
-    pub fn line(&self, offset: Rva) -> &Line {
-        self.lines
-            .iter()
-            .find(|&line| offset < line.offset)
-            .unwrap_or(self.lines.last().unwrap())
+    fn line(&self, offset: Rva) -> &Line {
+        let idx = self.lines.partition_point(|line| line.offset <= offset);
+
+        if idx == self.lines.len() {
+            self.lines.last().unwrap()
+        } else {
+            &self.lines[idx - 1]
+        }
     }
 }
 
@@ -121,12 +127,12 @@ impl SourceInfo {
 /// function is implemented as well as the line of code.
 #[derive(Default, Debug)]
 struct FuncSymbol {
-    pub name: String,
-    pub source_info: Option<SourceInfo>,
+    name: Box<str>,
+    source_info: Option<SourceInfo>,
 }
 
 impl FuncSymbol {
-    fn new(name: String, source_info: Option<SourceInfo>) -> Self {
+    fn new(name: Box<str>, source_info: Option<SourceInfo>) -> Self {
         Self { name, source_info }
     }
 }
@@ -137,40 +143,76 @@ impl From<BuilderEntry> for FuncSymbol {
     }
 }
 
-/// A PDB cache.
+/// Stores lookup tables to be able to go from [`Rva`] to [`FuncSymbol`]/name,
+/// and from name to [`Rva`].
 ///
-/// It basically is a data-structure that stores all the information about the
-/// functions defined in a module. It extracts everything it can off a PDB and
-/// then toss it as a PDB file is larger than a [`PdbCache`] (as we don't care
-/// about types, variables, etc.).
-pub struct PdbCache {
-    module_name: String,
+/// SAFETY: The structure is self referential to be able to implement the name
+/// to [`Rva`] lookup (`names_to_symbols`).
+#[expect(non_camel_case_types)]
+struct DANGEROUS_InnerPdbCache {
+    /// This maps a symbol name to an index. This index can be used to get an
+    /// address range by reading `addrs`, or a [`FuncSymbol`] by reading
+    /// `symbols`.
+    ///
+    /// SAFETY: The string slice references aren't static and are backed by the
+    /// `name` `Box<str>` in [`FuncSymbol`]. This means those locations cannot
+    /// move; so mutating `symbols` or [`FuncSymbol`].name is forbidden. All
+    /// those references are acquired once the `symbols` vector has been fully
+    /// built up as well.
+    ///
+    /// Miri tests at the bottom of this file.
+    names_to_symbols: HashMap<&'static str, usize>,
+    /// Ordered ranges of function RVAs. The same index used can also be used to
+    /// index into `symbols`. `addrs[n]` gives you the range of a function, and
+    /// `symbols[n]` gives you the associated [`FuncSymbol`].
     addrs: Vec<Range<Rva>>,
+    /// Vector of [`FuncSymbol`] that is synchronized with the `addrs` vector.
+    /// `symbols[n]` give you a [`FuncSymbol`] describing a function and
+    /// `addrs[n]` gives you its range.
     symbols: Vec<FuncSymbol>,
+    /// Name of the module for which this cache was created for.
+    module_name: Box<str>,
 }
 
-impl Debug for PdbCache {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PdbCache")
-            .field("module_name", &self.module_name)
-            .finish_non_exhaustive()
-    }
-}
-
-impl PdbCache {
+impl DANGEROUS_InnerPdbCache {
     fn new(module_name: String, mut symbols: Vec<(Range<Rva>, FuncSymbol)>) -> Self {
         symbols.sort_unstable_by_key(|(range, _)| range.end);
-        let (addrs, symbols) = symbols.into_iter().unzip();
+        let skip_invalid = {
+            let mut last_range = 0..0;
 
-        Self {
-            module_name,
+            move |(range, _): &(Range<Rva>, FuncSymbol)| {
+                // Skip empty ranges, and overlapping ranges.
+                let valid_range = !range.is_empty() && range.start >= last_range.end;
+                last_range = range.clone();
+
+                valid_range
+            }
+        };
+
+        let (addrs, symbols): (Vec<_>, Vec<_>) = symbols.into_iter().filter(skip_invalid).unzip();
+        let names_to_symbols = HashMap::with_capacity(addrs.len());
+        let module_name = module_name.into_boxed_str();
+
+        let mut meself = Self {
+            names_to_symbols,
             addrs,
             symbols,
+            module_name,
+        };
+
+        for (idx, symbol) in meself.symbols.iter().enumerate() {
+            // SAFETY: The backing store of slice is in a `Box<str>`, therefore has a
+            // constant address and the references will be valid as long as the backing
+            // store.
+            let immortal_name = unsafe { elyxir_of_life(&symbol.name) };
+            meself.names_to_symbols.insert(immortal_name, idx);
         }
+
+        meself
     }
 
     /// Find a symbol that contains `rva`.
-    fn find_sym(&self, rva: Rva) -> Option<(Rva, &FuncSymbol)> {
+    fn sym_by_addr(&self, rva: Rva) -> Option<(Rva, &FuncSymbol)> {
         let idx = self.addrs.partition_point(|probe| probe.end <= rva);
         if idx == self.addrs.len() {
             return None;
@@ -186,16 +228,57 @@ impl PdbCache {
         }
     }
 
+    /// Find the start address of a function by its name.
+    fn addr_by_name(&self, name: &str) -> Option<Rva> {
+        self.names_to_symbols
+            .get(name)
+            .map(|idx| self.addrs[*idx].start)
+    }
+}
+
+/// A PDB cache.
+///
+/// It stores all the information about the functions defined in a module. It
+/// extracts everything it can off a PDB and then toss it as a PDB file is
+/// larger than a [`PdbCache`] (as we don't care about types, variables, etc.).
+pub(crate) struct PdbCache {
+    inner: DANGEROUS_InnerPdbCache,
+}
+
+impl Debug for PdbCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PdbCache")
+            .field("module_name", &self.inner.module_name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PdbCache {
+    fn new(module_name: String, symbols: Vec<(Range<Rva>, FuncSymbol)>) -> Self {
+        let inner = DANGEROUS_InnerPdbCache::new(module_name, symbols);
+
+        Self { inner }
+    }
+
+    /// Find a symbol that contains `rva`.
+    fn sym_by_addr(&self, rva: Rva) -> Option<(Rva, &FuncSymbol)> {
+        self.inner.sym_by_addr(rva)
+    }
+
+    /// Find the start address of a function by its name.
+    pub fn addr_by_name(&self, name: &str) -> Option<Rva> {
+        self.inner.addr_by_name(name)
+    }
+
     /// Symbolize a raw address.
     ///
     /// This pulls as much information as possible and use any private symbols
     /// if there were any.
-    #[expect(clippy::unnecessary_wraps)]
-    pub fn symbolize(&self, rva: Rva) -> Result<String> {
+    pub fn symbolize(&self, rva: Rva) -> String {
         // Find the function in which this `rva` is in.
-        let Some((func_rva, func_symbol)) = self.find_sym(rva) else {
+        let Some((func_rva, func_symbol)) = self.sym_by_addr(rva) else {
             // If we can't find one, we'll just return `module.dll+rva`.
-            return Ok(format!("{}+{:#x}", self.module_name, rva));
+            return format!("{}+{:#x}", self.inner.module_name, rva);
         };
 
         debug_assert!(
@@ -207,37 +290,37 @@ impl PdbCache {
         let instr_offset = rva - func_rva;
 
         // Generate the symbolized version.
-        let symbolized = if let Some(source_info) = &func_symbol.source_info {
-            // If we have knowledge about in which source file this is implemented and at
-            // what line number, then let's use it..
+        if let Some(source_info) = &func_symbol.source_info {
+            // If we know which source file this is implemented in and at what line number,
+            // then let's use it..
             let line = source_info.line(instr_offset);
-            let path = line.override_path.as_ref().unwrap_or(&source_info.path);
+            let path = line.override_path.as_deref().unwrap_or(&source_info.path);
 
             format!(
                 "{}!{}+{instr_offset:#x} [{path} @ {}]",
-                self.module_name, func_symbol.name, line.number
+                self.inner.module_name, func_symbol.name, line.number
             )
         } else {
             // ..or do without if it's not present.
             format!(
                 "{}!{}+{instr_offset:#x}",
-                self.module_name, func_symbol.name
+                self.inner.module_name, func_symbol.name
             )
-        };
-
-        Ok(symbolized)
+        }
     }
 }
 
 #[derive(Debug)]
 struct BuilderEntry {
-    name: String,
+    name: Box<str>,
     len: Option<u32>,
     source_info: Option<SourceInfo>,
 }
 
 impl BuilderEntry {
     fn new(name: String, len: Option<u32>, source_info: Option<SourceInfo>) -> Self {
+        let name = name.into_boxed_str();
+
         Self {
             name,
             len,
@@ -245,7 +328,7 @@ impl BuilderEntry {
         }
     }
 
-    fn with_name(name: String) -> Self {
+    fn from_name(name: String) -> Self {
         Self::new(name, None, None)
     }
 
@@ -271,7 +354,7 @@ impl BuilderEntry {
 /// Once we have a list of functions with assigned sizes, we can finally build
 /// the [`PdbCache`] structure.
 #[derive(Debug)]
-pub struct PdbCacheBuilder<'module> {
+pub(crate) struct PdbCacheBuilder<'module> {
     /// The module for which this symbol cache is for.
     module: &'module Module,
     /// Basically all the information we've extracted so far.
@@ -296,7 +379,7 @@ impl<'module> PdbCacheBuilder<'module> {
     /// EAT of a module.
     pub fn ingest(&mut self, symbols: impl IntoIterator<Item = (Rva, String)>) {
         for (start, name) in symbols {
-            self.symbols.insert(start, BuilderEntry::with_name(name));
+            self.symbols.insert(start, BuilderEntry::from_name(name));
         }
     }
 
@@ -320,7 +403,7 @@ impl<'module> PdbCacheBuilder<'module> {
 
         let mut lines_it = line_program.lines_for_symbol(proc.offset);
         let mut main_path = None;
-        let mut lines = Lines::new();
+        let mut lines = Vec::new();
         while let Some(line) = lines_it.next()? {
             let Some(pdb2::Rva(line_rva)) = line.offset.to_rva(address_map) else {
                 warn!(
@@ -395,7 +478,10 @@ impl<'module> PdbCacheBuilder<'module> {
         len: Option<u32>,
         source_info: Option<SourceInfo>,
     ) -> Result<()> {
+        use std::collections::btree_map::Entry;
+
         use msvc_demangler::DemangleFlags as DF;
+
         let undecorated_name = if name.as_bytes().starts_with(b"?") {
             // Demangle the name if it starts by a '?'.
             match msvc_demangler::demangle(&name, DF::NAME_ONLY) {
@@ -421,11 +507,30 @@ impl<'module> PdbCacheBuilder<'module> {
         })?;
 
         //.. and build an entry for this function.
-        if let Some(prev) = self
-            .symbols
-            .insert(rva, BuilderEntry::new(undecorated_name, len, source_info))
-        {
-            trace!("symbol {prev:?} in dbi has a duplicate at {rva:#x}, skipping");
+        match self.symbols.entry(rva) {
+            Entry::Vacant(v) => {
+                v.insert(BuilderEntry::new(undecorated_name, len, source_info));
+            }
+            Entry::Occupied(mut o) => {
+                // If we have a len and we didn't have one before, let's grab it..
+                let mut updated = false;
+                if o.get().len.is_none() && len.is_some() {
+                    o.get_mut().len = len;
+                    updated = true;
+                }
+
+                // ..and same with `source_info`.
+                if o.get().source_info.is_none() && source_info.is_some() {
+                    o.get_mut().source_info = source_info;
+                    updated = true;
+                }
+
+                if !updated {
+                    trace!(
+                        "symbol {undecorated_name:?} in dbi has a duplicate at {rva:#x} ({o:?}, skipping"
+                    );
+                }
+            }
         }
 
         Ok(())
@@ -581,5 +686,323 @@ impl<'module> PdbCacheBuilder<'module> {
         }
 
         Ok(PdbCache::new(self.module.name.clone(), functions))
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct PdbCacheStore(HashMap<Range<u64>, PdbCache>);
+
+impl PdbCacheStore {
+    pub fn get_or_create(
+        &mut self,
+        module: &Module,
+        create: impl FnOnce() -> Result<PdbCache>,
+    ) -> Result<&PdbCache> {
+        // This is an infamous issue w/ the NLL (current) borrow checker called 'problem
+        // #3'.
+        //
+        // Some references:
+        //   - https://nikomatsakis.github.io/rust-belt-rust-2019/#72
+        //   - https://docs.rs/polonius-the-crab/latest/polonius_the_crab/
+        //
+        // SAFETY: It is a known limitation of the borrow checker. Miri tests at the end
+        // of this file.
+        //
+        // What we are doing here is basically side step lifetimes by using the `cache`
+        // through a pointer instead.
+        let cache = (&raw mut (self.0)).cast::<HashMap<Range<u64>, PdbCache>>();
+        if let Some(pdbcache) = unsafe { (*cache).get(&module.at) } {
+            return Ok(pdbcache);
+        }
+
+        let pdbcache = create()?;
+
+        Ok(unsafe { (*cache).entry(module.at.clone()).or_insert(pdbcache) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::swap;
+
+    use crate::Module;
+    use crate::pdbcache::{FuncSymbol, Line, PdbCache, PdbCacheStore, SourceInfo};
+
+    #[test]
+    fn empty_cache() {
+        let cache = PdbCache::new("hello".to_string(), Vec::new());
+        assert_eq!(cache.addr_by_name("foo"), None);
+        assert!(cache.sym_by_addr(0x1337).is_none());
+        assert_eq!(cache.symbolize(0x1337), "hello+0x1337".to_string());
+    }
+
+    #[test]
+    fn basic_cache() {
+        let symbols = vec![
+            (0..1, FuncSymbol {
+                name: "sym0..1".to_string().into_boxed_str(),
+                source_info: None,
+            }),
+            (2..5, FuncSymbol {
+                name: "sym2..5".to_string().into_boxed_str(),
+                source_info: None,
+            }),
+            (100..106, FuncSymbol {
+                name: "sym100..106".to_string().into_boxed_str(),
+                source_info: Some(SourceInfo::new("foo\\bar\\f.cc".to_string(), vec![
+                    Line::new(0, 1337, None),
+                    Line::new(3, 1338, None),
+                    Line::new(5, 1400, Some("foobar\\overriden.cc".to_string())),
+                ])),
+            }),
+        ];
+
+        let cache = PdbCache::new("hello".to_string(), symbols);
+        assert_eq!(cache.addr_by_name("sym100..106").unwrap(), 100);
+        assert!(cache.addr_by_name("Sym100..106").is_none());
+        assert_eq!(cache.symbolize(1), "hello+0x1".to_string());
+        assert_eq!(cache.symbolize(0), "hello!sym0..1+0x0".to_string());
+        assert_eq!(cache.symbolize(2), "hello!sym2..5+0x0".to_string());
+        assert_eq!(cache.symbolize(4), "hello!sym2..5+0x2".to_string());
+        assert_eq!(
+            cache.symbolize(100),
+            "hello!sym100..106+0x0 [foo\\bar\\f.cc @ 1337]".to_string()
+        );
+        assert_eq!(
+            cache.symbolize(101),
+            "hello!sym100..106+0x1 [foo\\bar\\f.cc @ 1337]".to_string()
+        );
+        assert_eq!(
+            cache.symbolize(102),
+            "hello!sym100..106+0x2 [foo\\bar\\f.cc @ 1337]".to_string()
+        );
+        assert_eq!(
+            cache.symbolize(103),
+            "hello!sym100..106+0x3 [foo\\bar\\f.cc @ 1338]".to_string()
+        );
+        assert_eq!(
+            cache.symbolize(104),
+            "hello!sym100..106+0x4 [foo\\bar\\f.cc @ 1338]".to_string()
+        );
+        assert_eq!(
+            cache.symbolize(105),
+            "hello!sym100..106+0x5 [foobar\\overriden.cc @ 1400]".to_string()
+        );
+        assert_eq!(cache.symbolize(106), "hello+0x6a".to_string());
+    }
+
+    #[test]
+    fn swap_cache() {
+        let symbols = vec![
+            (0..1, FuncSymbol {
+                name: "sym0..1".to_string().into_boxed_str(),
+                source_info: None,
+            }),
+            (2..5, FuncSymbol {
+                name: "sym2..5".to_string().into_boxed_str(),
+                source_info: None,
+            }),
+            (100..102, FuncSymbol {
+                name: "sym100..102".to_string().into_boxed_str(),
+                source_info: None,
+            }),
+        ];
+
+        let mut cache = PdbCache::new("hello".to_string(), symbols);
+        let mut empty_cache = PdbCache::new("foobar".to_string(), vec![]);
+        swap(&mut cache, &mut empty_cache);
+
+        assert_eq!(empty_cache.symbolize(0), "hello!sym0..1+0x0".to_string());
+        assert_eq!(empty_cache.symbolize(2), "hello!sym2..5+0x0".to_string());
+        drop(cache);
+        assert_eq!(empty_cache.symbolize(4), "hello!sym2..5+0x2".to_string());
+    }
+
+    #[test]
+    fn weird_cache() {
+        let symbols = vec![
+            (0..1, FuncSymbol {
+                name: "sym0..1".to_string().into_boxed_str(),
+                source_info: None,
+            }),
+            (0..2, FuncSymbol {
+                name: "sym0..1'".to_string().into_boxed_str(),
+                source_info: None,
+            }),
+            (0..3, FuncSymbol {
+                name: "sym0..101'".to_string().into_boxed_str(),
+                source_info: None,
+            }),
+            (100..100, FuncSymbol {
+                name: "sym100..100".to_string().into_boxed_str(),
+                source_info: None,
+            }),
+        ];
+
+        // Verify that empty range / overlapping ranges are skipped.
+        let cache = PdbCache::new("hello.foo".to_string(), symbols);
+        assert_eq!(cache.symbolize(0), "hello.foo!sym0..1+0x0".to_string());
+        // has been skipped because overlapped w/ previous entry
+        assert_eq!(cache.symbolize(1), "hello.foo+0x1".to_string());
+        // has been skipped because 0 length range
+        assert_eq!(cache.symbolize(100), "hello.foo+0x64".to_string());
+    }
+
+    #[test]
+    fn cache_store_returns_cached() {
+        // Verify that get_or_create returns the cached entry and doesn't call
+        // the closure the second time.
+        let mut store = PdbCacheStore::default();
+        let module = Module::new("mod.dll", 0x0, 0x1_000);
+
+        let symbols = vec![(0..10, FuncSymbol {
+            name: "first".to_string().into_boxed_str(),
+            source_info: None,
+        })];
+
+        // First call populates the cache.
+        let c1 = store
+            .get_or_create(&module, || Ok(PdbCache::new("mod.dll".into(), symbols)))
+            .unwrap();
+        assert_eq!(c1.symbolize(0), "mod.dll!first+0x0");
+
+        // Second call should return the cached entry; the closure would panic if
+        // invoked.
+        let c2 = store.get_or_create(&module, || panic!("")).unwrap();
+        assert_eq!(c2.symbolize(0), "mod.dll!first+0x0");
+    }
+
+    #[test]
+    fn cache_store_propagates_error() {
+        let mut store = PdbCacheStore::default();
+        let module = Module::new("bad.dll", 0x0, 0x1_000);
+
+        let result = store.get_or_create(&module, || Err(crate::Error::Other("nope".into())));
+        assert!(result.is_err());
+
+        // After a failed create, the module should not be cached; a subsequent
+        // call with a working closure should succeed.
+        let symbols = vec![(0..5, FuncSymbol {
+            name: "first".to_string().into_boxed_str(),
+            source_info: None,
+        })];
+        let cache = store
+            .get_or_create(&module, || Ok(PdbCache::new("bad.dll".into(), symbols)))
+            .unwrap();
+        assert_eq!(cache.symbolize(0), "bad.dll!first+0x0");
+    }
+
+    #[test]
+    fn cache_store_multiple_modules() {
+        let mut store = PdbCacheStore::default();
+        let modules: Vec<_> = (0..5u64)
+            .map(|i| Module::new(format!("mod{i}.dll"), i * 0x1_000, (i + 1) * 0x1_000))
+            .collect();
+
+        for module in &modules {
+            let name = module.name.clone();
+            let cache = store
+                .get_or_create(module, || {
+                    Ok(PdbCache::new(name, vec![(0..10, FuncSymbol {
+                        name: "f".to_string().into_boxed_str(),
+                        source_info: None,
+                    })]))
+                })
+                .unwrap();
+            assert_eq!(cache.symbolize(0), format!("{}!f+0x0", module.name));
+        }
+
+        // All modules should be cached now.
+        for module in &modules {
+            let cache = store
+                .get_or_create(module, || panic!("should not be called"))
+                .unwrap();
+            assert_eq!(cache.symbolize(5), format!("{}!f+0x5", module.name));
+        }
+    }
+
+    #[test]
+    fn source_info_single_line() {
+        let si = SourceInfo::new("main.c".into(), vec![Line::new(0, 1, None)]);
+        assert_eq!(si.path.as_ref(), "main.c");
+
+        // Any offset falls through to the last (and only) line.
+        let l = si.line(0);
+        assert_eq!(l.number, 1);
+        assert!(l.override_path.is_none());
+
+        let l = si.line(999);
+        assert_eq!(l.number, 1);
+    }
+
+    #[test]
+    fn cache_unsorted_input() {
+        // Symbols given out of order should still be sorted correctly.
+        let symbols = vec![
+            (50..60, FuncSymbol {
+                name: "middle".to_string().into_boxed_str(),
+                source_info: None,
+            }),
+            (0..10, FuncSymbol {
+                name: "first".to_string().into_boxed_str(),
+                source_info: None,
+            }),
+            (100..110, FuncSymbol {
+                name: "last".to_string().into_boxed_str(),
+                source_info: None,
+            }),
+        ];
+
+        let cache = PdbCache::new("mod.dll".to_string(), symbols);
+        assert_eq!(cache.symbolize(0), "mod.dll!first+0x0");
+        assert_eq!(cache.symbolize(55), "mod.dll!middle+0x5");
+        assert_eq!(cache.symbolize(109), "mod.dll!last+0x9");
+
+        assert_eq!(cache.addr_by_name("first"), Some(0));
+        assert_eq!(cache.addr_by_name("middle"), Some(50));
+        assert_eq!(cache.addr_by_name("last"), Some(100));
+    }
+
+    #[test]
+    fn cache_duplicate_names() {
+        // Two different ranges with the same symbol name; the last inserted
+        // wins in the name→addr map.
+        let symbols = vec![
+            (0..10, FuncSymbol {
+                name: "dup".to_string().into_boxed_str(),
+                source_info: None,
+            }),
+            (20..30, FuncSymbol {
+                name: "dup".to_string().into_boxed_str(),
+                source_info: None,
+            }),
+        ];
+
+        let cache = PdbCache::new("d.dll".to_string(), symbols);
+        // Both should be reachable by address.
+        assert_eq!(cache.symbolize(5), "d.dll!dup+0x5");
+        assert_eq!(cache.symbolize(25), "d.dll!dup+0x5");
+
+        // addr_by_name returns one of them.
+        assert!(cache.addr_by_name("dup").is_some());
+    }
+
+    #[test]
+    fn cache_boundary_addresses() {
+        let symbols = vec![(10..20, FuncSymbol {
+            name: "func".to_string().into_boxed_str(),
+            source_info: None,
+        })];
+
+        let cache = PdbCache::new("m.dll".to_string(), symbols);
+
+        // Before the range.
+        assert_eq!(cache.symbolize(9), "m.dll+0x9");
+        // Start of range (inclusive).
+        assert_eq!(cache.symbolize(10), "m.dll!func+0x0");
+        // Last address in range.
+        assert_eq!(cache.symbolize(19), "m.dll!func+0x9");
+        // End of range (exclusive).
+        assert_eq!(cache.symbolize(20), "m.dll+0x14");
     }
 }

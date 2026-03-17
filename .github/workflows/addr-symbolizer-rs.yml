@@ -64,11 +64,23 @@ jobs:
       - name: Set up rust
         run: rustup default stable
 
+      - name: Set up rust nightly
+        run: rustup install nightly
+      
+      - name: Set up miri
+        run: rustup +nightly component add miri
+
       - name: cargo test
         run: cargo test --workspace
 
       - name: cargo test release
         run: cargo test --release --workspace
+
+      - name: cargo test w/ miri
+        run: cargo +nightly miri test --workspace
+
+      - name: cargo test release w/ miri
+        run: cargo +nightly miri test --release --workspace
 
       - name: cargo check
         run: cargo check --workspace --examples --tests

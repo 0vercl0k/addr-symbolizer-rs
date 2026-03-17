@@ -50,9 +50,9 @@ impl Modules {
         Self(modules)
     }
 
-    /// Find the module that contains this address.
+    /// Find a module that contains this address.
     #[must_use]
-    pub fn find(&self, addr: u64) -> Option<&Module> {
+    pub fn by_addr(&self, addr: u64) -> Option<&Module> {
         // Find the index of the first module that might contain `addr`.
         let idx = self.0.partition_point(|m| m.at.end <= addr);
 
@@ -78,6 +78,12 @@ impl Modules {
             None
         }
     }
+
+    /// Find a module by name.
+    #[must_use]
+    pub fn by_name(&self, name: &str) -> Option<&Module> {
+        self.0.iter().find(|module| module.name == name)
+    }
 }
 
 #[cfg(test)]
@@ -92,11 +98,17 @@ mod tests {
             Module::new("bar".to_string(), 0x4_000, 0x5_000),
         ]);
 
-        assert!(modules.find(1).is_none());
-        assert_eq!(modules.find(0x1_000).unwrap().name, "foo");
-        assert_eq!(modules.find(0x2_000).unwrap().name, "foobar");
-        assert!(modules.find(0x3_000).is_none());
-        assert_eq!(modules.find(0x4_fff).unwrap().name, "bar");
-        assert!(modules.find(0x6_000).is_none());
+        assert!(modules.by_addr(1).is_none());
+        assert_eq!(modules.by_addr(0x1_000).unwrap().name, "foo");
+        assert_eq!(modules.by_name("foo").unwrap().at.start, 0x1_000);
+        // assert_eq!(modules.by_name("Foo").unwrap().at.start, 0x1_000);
+        assert_eq!(modules.by_addr(0x2_000).unwrap().name, "foobar");
+        assert_eq!(modules.by_name("foobar").unwrap().at.start, 0x2_000);
+        // assert_eq!(modules.by_name("Foobar").unwrap().at.start, 0x2_000);
+        assert!(modules.by_addr(0x3_000).is_none());
+        assert!(modules.by_name("bleh").is_none());
+        assert_eq!(modules.by_addr(0x4_fff).unwrap().name, "bar");
+        assert_eq!(modules.by_name("bar").unwrap().at.start, 0x4_000);
+        assert!(modules.by_addr(0x6_000).is_none());
     }
 }

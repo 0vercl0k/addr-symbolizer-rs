@@ -1,6 +1,6 @@
 [package]
 name = "addr-symbolizer"
-version = "0.2.0"
+version = "0.3.0"
 categories = ["parser-implementations"]
 description = "A KISS Rust crate to symbolize function addresses using Windows PDB files."
 include = ["/Cargo.toml", "/LICENSE", "/src/**", "/examples/**", "/tests/**", "README.md"]
@@ -30,6 +30,7 @@ object = { version = "0.38", default-features = false, features = [
 clap = { version = "4.5", features = ["derive"] }
 env_logger = { version = "0.11" }
 anyhow = "1.0"
+zip = "8.4"
 
 [lints.clippy]
 pedantic = "warn"
