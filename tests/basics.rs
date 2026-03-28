@@ -507,7 +507,8 @@ mod miri_incompatible_tests {
     #[test]
     fn source_info() -> Result<()> {
         const MAIN_OFFSET: u64 = 0x1_05c;
-        let file = File::open(testdata("small.exe"))?;
+        let file_path = testdata("small.exe");
+        let file = File::open(&file_path)?;
         let cache = ReadCache::new(file);
         let mut file_addr_space = FileAddressSpace64::new(&cache)?;
         let len = file_addr_space.len();
@@ -517,6 +518,9 @@ mod miri_incompatible_tests {
             PdbLookupConfig::new(symcache.as_ref().to_path_buf())?,
             vec![Module::new("small.exe", 0x0, len)],
         );
+
+        let parent_dir = file_path.parent().unwrap();
+        symb.import_pdbs([parent_dir])?;
 
         // ```text
         // 0:000> ? small!main - small

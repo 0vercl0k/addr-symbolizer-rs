@@ -7,7 +7,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::io::{self, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
-use log::{debug, trace, warn};
+use log::{debug, info, trace, warn};
 
 use crate::addr_space::AddrSpace;
 use crate::misc::{fast_hex32, fast_hex64, parse_full_name};
@@ -17,7 +17,7 @@ use crate::pdbcache::{
 };
 use crate::pe::{PdbId, Pe, PeId, SymcacheEntry};
 use crate::stats::Stats;
-use crate::{Error, Result};
+use crate::{Error, Guid, Result};
 
 #[derive(Debug)]
 struct DownloadedFile {
@@ -131,19 +131,9 @@ fn download_from_symsrv<'s>(
 
         // If the server knows about this file, it is time to create the directory
         // structure in which we'll download the file into.
-        if !entry_root_dir.try_exists()? {
-            debug!("creating {}..", entry_root_dir.display());
-            fs::create_dir(&entry_root_dir).map_err(|_| {
-                Error::Other(format!(
-                    "failed to create base PE/PDB dir {}",
-                    entry_root_dir.display()
-                ))
-            })?;
-        }
-
         if !entry_dir.try_exists()? {
             debug!("creating {}..", entry_dir.display());
-            fs::create_dir(&entry_dir).map_err(|_| {
+            fs::create_dir_all(&entry_dir).map_err(|_| {
                 Error::Other(format!("failed to create pdb dir {}", entry_dir.display()))
             })?;
         }
@@ -432,14 +422,17 @@ impl PdbLookupConfig {
         Self::inner_new(symcache, Some(symsrvs))
     }
 
+    #[must_use]
     pub fn symcache(&self) -> &Path {
         &self.symcache
     }
 
+    #[must_use]
     pub fn is_offline(&self) -> bool {
         self.symsrvs.is_none()
     }
 
+    #[must_use]
     pub fn is_online(&self) -> bool {
         self.symsrvs.is_some()
     }
@@ -577,7 +570,8 @@ impl Symbolizer {
         }
     }
 
-    /// XXX:
+    /// Resolves a symbol name (eg `mod.dll!foo+0x1337` / `mod.dll+0x1337`) into
+    /// an address.
     pub fn name_to_addr(
         &mut self,
         addr_space: &mut impl AddrSpace,
@@ -599,5 +593,79 @@ impl Symbolizer {
         Ok(pdbcache
             .addr_by_name(parsed_name.function_name)
             .map(|base_addr| u64::from(base_addr).strict_add(parsed_name.offset)))
+    }
+
+    /// Imports PDBs from other directory into the symcache that is used by this
+    /// [`Symbolizer`].
+    pub fn import_pdbs(&self, dirs: impl IntoIterator<Item = impl AsRef<Path>>) -> Result<()> {
+        for dir in dirs {
+            let dir = dir.as_ref();
+            if !(dir.exists() && dir.is_dir()) {
+                return Err(Error::Other(format!(
+                    "cannot import pdb from {} as it doesn't exist or isn't a directory",
+                    dir.display()
+                )));
+            }
+
+            for file in dir.read_dir()? {
+                let path = file?.path();
+                if !path.is_file() {
+                    debug!("skipping {} because not a file", path.display());
+                    continue;
+                }
+
+                let Some(ext) = path.extension() else {
+                    debug!(
+                        "skipping {} because doesn't have an extension",
+                        path.display()
+                    );
+                    continue;
+                };
+
+                if ext != "pdb" {
+                    debug!("skipping {} because not a pdb file", path.display());
+                    continue;
+                }
+
+                let Some(filename) = path.file_name() else {
+                    debug!("skipping {} because no filename", path.display());
+                    continue;
+                };
+
+                let mut pdb = pdb2::PDB::open(File::open(&path)?)?;
+                let info = pdb.pdb_information()?;
+                let debug_info = pdb.debug_information()?;
+                let Some(age) = debug_info.age() else {
+                    continue;
+                };
+
+                let pdbid = PdbId::new(filename, Guid::from(info.guid.to_bytes_le()), age)?;
+                let cached_pdb = format_symcache_path(self.pdb_lookup.symcache(), &pdbid);
+                if cached_pdb.exists() {
+                    debug!(
+                        "skipping {} because already in symbol cache",
+                        path.display()
+                    );
+                    continue;
+                }
+
+                let Some(cached_pdb_dir) = cached_pdb.parent() else {
+                    return Err(Error::Other(format!(
+                        "{} has no parent",
+                        cached_pdb.display()
+                    )));
+                };
+
+                info!(
+                    "copying {} into the symbol cache at {}",
+                    path.display(),
+                    cached_pdb.display()
+                );
+                fs::create_dir_all(cached_pdb_dir)?;
+                fs::copy(path, cached_pdb)?;
+            }
+        }
+
+        Ok(())
     }
 }
