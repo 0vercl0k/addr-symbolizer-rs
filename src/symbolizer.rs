@@ -225,7 +225,6 @@ fn get_pdb(pdb_lookup: &PdbLookupConfig, pdb_id: &PdbId) -> Result<Option<PdbLoc
     // Now, let's see if it's in the local cache..
     let symcache = &pdb_lookup.symcache;
     let local_path = format_symcache_path(symcache, pdb_id);
-    println!("{local_path:?}");
     if local_path.is_file() {
         // .. if it does, this is a 'LocalCache' PDB.
         return Ok(Some(PdbLocation::new(
