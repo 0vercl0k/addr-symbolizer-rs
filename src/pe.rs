@@ -553,8 +553,39 @@ impl Pe {
         // All right, at this point we have everything we need: the PDB name / GUID /
         // age. Those are the three piece of information we need to download a PDB
         // off Microsoft's symbol server.
+        //
+        // But one more thing. The path we just read is a Windows path (eg
+        // `c:\small.pdb`). Because we support UNIX platforms, we need to be
+        // careful with it. Instead of a many words here's a simple piece of
+        // code:
+        //
+        // ```rust
+        // fn main() {
+        //     let path: &std::path::Path = std::path::Path::new(r"C:\small.pdb");
+        //     println!("{path:?}, {:?}", path.file_name());
+        // }
+        // ```
+        //
+        // and here is the result running it on Linux..:
+        //
+        // ```text
+        // "C:\\small.pdb", Some("C:\\small.pdb")
+        // ```
+        //
+        // ..and on Windows:
+        //
+        // ```text
+        // "C:\\small.pdb", Some("small.pdb")
+        // ```
+        //
+        // See the issue?
+        // To avoid this, we break it down into components by hands. The
+        // resulting path might makes no sense on UNIX systems, but at least it is 'well
+        // formed' and the standard library can extract its filename and whatnot.
         Ok(Some(PdbId::new(
-            String::from_utf8(file_name)?,
+            String::from_utf8(file_name)?
+                .split('\\')
+                .collect::<PathBuf>(),
             codeview.guid.into(),
             codeview.age,
         )?))
