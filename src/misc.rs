@@ -118,7 +118,7 @@ pub(crate) fn parse_full_name(full: &str) -> Option<ParsedFullSymbolName<'_>> {
 
             (
                 function_name,
-                u64::from_str_radix(offset.trim_start_matches("0x"), 16).unwrap_or_default(),
+                u64::from_str_radix(offset.trim_start_matches("0x"), 16).ok()?,
             )
         }
         None => (rest, 0),

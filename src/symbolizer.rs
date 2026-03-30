@@ -95,18 +95,18 @@ fn download_from_symsrv<'s>(
     symsrvs: impl Iterator<Item = &'s str>,
     entry: &impl SymcacheEntry,
 ) -> Result<Option<DownloadedFile>> {
+    // The way a symbol path is structured is that there is a directory per module..
+    let symcache = symcache.as_ref();
+    let entry_root_dir = symcache.join(entry.name());
+
+    // ..and inside, there is a directory per version of the PE/PDB..
+    let entry_dir = entry_root_dir.join(entry.index());
+
+    // ..and finally the PE/PDB file itself.
+    let entry_path = entry_dir.join(entry.name());
+
     // Give a try to each of the symbol servers.
     for symsrv in symsrvs {
-        // The way a symbol path is structured is that there is a directory per module..
-        let symcache = symcache.as_ref();
-        let entry_root_dir = symcache.join(entry.name());
-
-        // ..and inside, there is a directory per version of the PE/PDB..
-        let entry_dir = entry_root_dir.join(entry.index());
-
-        // ..and finally the PE/PDB file itself.
-        let entry_path = entry_dir.join(entry.name());
-
         // The file doesn't exist on the file system, so let's try to download it from a
         // symbol server.
         let entry_url = format_symsrv_url(symsrv, entry);
@@ -636,6 +636,7 @@ impl Symbolizer {
                 let info = pdb.pdb_information()?;
                 let debug_info = pdb.debug_information()?;
                 let Some(age) = debug_info.age() else {
+                    debug!("skipping {} because no age in debug info", path.display());
                     continue;
                 };
 
