@@ -1,6 +1,6 @@
 // Axel '0vercl0k' Souchet - May 30 2024
 
-// #[cfg(not(miri))]
+#[cfg(not(miri))]
 mod miri_incompatible_tests {
     use std::env::temp_dir;
     use std::error::Error;
@@ -14,7 +14,7 @@ mod miri_incompatible_tests {
     use addr_symbolizer::{AddrSpace, Module, PdbId, PdbLookupConfig, PeId, Symbolizer};
     use object::pe::IMAGE_DIRECTORY_ENTRY_DEBUG;
     use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile, PeFile64};
-    use object::{LittleEndian, ReadCache, ReadRef, pe};
+    use object::{ReadCache, ReadRef, pe};
     use zip::ZipArchive;
 
     type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -56,11 +56,11 @@ mod miri_incompatible_tests {
 
             let mut full = Vec::new();
             symb.symbolize_full(addr_space, self.offset, &mut full)?;
-            assert_eq!(String::from_utf8(full)?, self.full);
+            assert_eq!(str::from_utf8(&full)?, self.full);
 
             let mut modoff = Vec::new();
             symb.symbolize_modoff(self.offset, &mut modoff)?;
-            assert_eq!(String::from_utf8(modoff)?, self.modoff);
+            assert_eq!(str::from_utf8(&modoff)?, self.modoff);
 
             Ok(())
         }
@@ -288,7 +288,7 @@ mod miri_incompatible_tests {
         for expected in EXPECTED_RAW {
             let mut modoff = Vec::new();
             symb.symbolize_modoff(expected.offset, &mut modoff)?;
-            assert_eq!(String::from_utf8(modoff)?, expected.modoff);
+            assert_eq!(str::from_utf8(&modoff)?, expected.modoff);
         }
 
         assert_eq!(
@@ -299,7 +299,7 @@ mod miri_incompatible_tests {
 
         let mut full = Vec::new();
         symb.symbolize_full(&mut raw_addr_space, EXPORTED_FUNCTION.offset, &mut full)?;
-        assert_eq!(String::from_utf8(full)?, EXPORTED_FUNCTION.full);
+        assert_eq!(str::from_utf8(&full)?, EXPORTED_FUNCTION.full);
 
         assert!(
             symb.name_to_addr(&mut raw_addr_space, PRIVATE_FUNCTION.full)?
@@ -308,7 +308,7 @@ mod miri_incompatible_tests {
 
         let mut full = Vec::new();
         symb.symbolize_full(&mut raw_addr_space, PRIVATE_FUNCTION.offset, &mut full)?;
-        assert_ne!(String::from_utf8(full)?, PRIVATE_FUNCTION.full);
+        assert_ne!(str::from_utf8(&full)?, PRIVATE_FUNCTION.full);
 
         let stats = symb.stats();
         assert_eq!(stats.amount_downloaded(), 0);
@@ -316,20 +316,23 @@ mod miri_incompatible_tests {
         Ok(())
     }
 
+    /// Read a PE file like it is mapped into memory. The underlying `read_at`
+    /// method has logic to figure out in which section a specific address lands
+    /// in, and then calculate the file offset to read the appropriate data.
     #[derive(Debug)]
-    struct FileAddressSpace<'data, P>
+    struct FileAddressSpace<'cache, P>
     where
         P: ImageNtHeaders,
     {
-        pe: PeFile<'data, P, &'data ReadCache<File>>,
+        pe: PeFile<'cache, P, &'cache ReadCache<File>>,
         virt_len: u64,
     }
 
-    impl<'data, P> FileAddressSpace<'data, P>
+    impl<'cache, P> FileAddressSpace<'cache, P>
     where
         P: ImageNtHeaders,
     {
-        fn new(cache: &'data ReadCache<File>) -> io::Result<Self> {
+        fn new(cache: &'cache ReadCache<File>) -> io::Result<Self> {
             let pe = PeFile::<P, &ReadCache<File>>::parse(cache)
                 .map_err(|e| io::Error::new(io::ErrorKind::Unsupported, e))?;
 
@@ -432,20 +435,51 @@ mod miri_incompatible_tests {
     }
 
     type OnDebugDirReadCallback = dyn Fn(u64, &mut [u8]) -> Option<io::Result<usize>>;
-    struct OverrideDebugDirAddrSpace {
-        file: File,
+    struct OverrideDebugDirAddrSpace<'cache> {
+        file: FileAddressSpace64<'cache>,
         debug_dir: Range<u64>,
         cb: Box<OnDebugDirReadCallback>,
     }
 
-    impl OverrideDebugDirAddrSpace {
-        fn new(path: impl AsRef<Path>, cb: Box<OnDebugDirReadCallback>) -> Result<Self> {
-            let file = File::open(path.as_ref()).unwrap();
-            let cache = ReadCache::new(&file);
-            let pe = PeFile64::parse(&cache)?;
+    impl<'cache> OverrideDebugDirAddrSpace<'cache> {
+        fn new(cache: &'cache ReadCache<File>, cb: Box<OnDebugDirReadCallback>) -> Result<Self> {
+            // pub(crate) struct ImageDebugDirectory {
+            //     pub characteristics: u32,     // +0x00
+            //     pub time_date_stamp: u32,     // +0x04
+            //     pub major_version: u16,       // +0x08
+            //     pub minor_version: u16,       // +0x0a
+            //     pub type_: u32,               // +0x0c
+            //     pub size_of_data: u32,        // +0x10
+            //     pub address_of_raw_data: u32, // +0x14
+            //     pub pointer_to_raw_data: u32, // +0x18
+            // }
+            const OFFSET_SIZE_OF_DATA: usize = 0x10;
+            const OFFSET_ADDRESS_OF_RAW_DATA: usize = 0x14;
+
+            // Parse the PE..
+            let pe = PeFile64::parse(cache)?;
+            // ..read the debug data directory header..
             let dir = pe.data_directory(IMAGE_DIRECTORY_ENTRY_DEBUG).unwrap();
-            let debug_dir = dir.virtual_address.get(LittleEndian).into()
-                ..(dir.virtual_address.get(LittleEndian) + dir.size.get(LittleEndian)).into();
+            // ..and read the debug directory content.
+            let sections = pe.section_table();
+            let debug_dir = dir.data(cache, &sections)?;
+            assert!(debug_dir.len() >= OFFSET_ADDRESS_OF_RAW_DATA + size_of::<u32>());
+
+            // Read the `size_of_data` field..
+            let mut size_of_data = [0; 4];
+            size_of_data.copy_from_slice(&debug_dir[OFFSET_SIZE_OF_DATA..][..size_of::<u32>()]);
+            let size_of_data = u32::from_le_bytes(size_of_data);
+
+            // .. and the `address_of_raw_data` field.
+            let mut address_of_raw_data = [0; 4];
+            address_of_raw_data
+                .copy_from_slice(&debug_dir[OFFSET_ADDRESS_OF_RAW_DATA..][..size_of::<u32>()]);
+            let address_of_raw_data = u32::from_le_bytes(address_of_raw_data);
+
+            // We now know the range of file reads we'll man-in-the-middle.
+            let debug_dir = address_of_raw_data.into()..(address_of_raw_data + size_of_data).into();
+
+            let file = FileAddressSpace::new(cache)?;
 
             Ok(Self {
                 file,
@@ -454,29 +488,31 @@ mod miri_incompatible_tests {
             })
         }
 
-        fn len(&self) -> Result<u64> {
-            Ok(self.file.metadata()?.len())
+        fn len(&self) -> u64 {
+            self.file.len()
         }
     }
 
-    impl AddrSpace for OverrideDebugDirAddrSpace {
+    impl AddrSpace for OverrideDebugDirAddrSpace<'_> {
         fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
             // If we're trying to read from the debug directory, pass it to `cb`.
-            if self.debug_dir.contains(&addr)
-                && let Some(r) = (self.cb)(addr, buf)
-            {
-                return r;
-            }
+            let strictly_contained =
+                addr >= self.debug_dir.start && (addr + buf.len() as u64) <= self.debug_dir.end;
+            let res = self.file.read_at(addr, buf)?;
 
-            self.file.seek(io::SeekFrom::Start(addr))?;
-
-            self.file.read(buf)
+            Ok(
+                if strictly_contained && let Some(overriden_res) = (self.cb)(addr, buf) {
+                    overriden_res?
+                } else {
+                    res
+                },
+            )
         }
     }
 
     #[test]
     fn download_pe() -> Result<()> {
-        let cb = |addr: u64, _buf: &mut [u8]| -> Option<io::Result<usize>> {
+        let cb = |_addr: u64, _buf: &mut [u8]| -> Option<io::Result<usize>> {
             // Make it look like there isn't a debug directory to force the library to not
             // be able to read the associated PDB identifier. It'll have to go and download
             // the PE first.
@@ -486,16 +522,11 @@ mod miri_incompatible_tests {
             // ...
             //     35D0 [      70] address [size] of Debug Directory
             // ```
-            if (0x35D0..(0x35D0 + 0x70)).contains(&addr) {
-                // Make it look like we couldn't read any bytes from this section.
-                Some(Ok(0))
-            } else {
-                // Let it read from the underlying file.
-                None
-            }
+            Some(Ok(0))
         };
-        let mut addr_space = OverrideDebugDirAddrSpace::new(testdata("clrhost.dll"), Box::new(cb))?;
-        let len = addr_space.len()?;
+        let cache = ReadCache::new(File::open(testdata("clrhost.dll"))?);
+        let mut addr_space = OverrideDebugDirAddrSpace::new(&cache, Box::new(cb))?;
+        let len = addr_space.len();
 
         let symcache = symcache("basics")?;
         let mut symb = Symbolizer::new(
@@ -535,27 +566,73 @@ mod miri_incompatible_tests {
         Ok(())
     }
 
-        let stats = symb.stats();
-        assert_eq!(stats.pe_download_count(), 1);
-        // This is the PE we should have downloaded:
-        //
-        // ```text
-        // File Type: DLL
-        // FILE HEADER VALUES
-        //     8664 machine (X64)
-        //        6 number of sections
-        // 7D1F08C1 time date stamp Tue Jul  8 20:10:57 2036
-        // ...
-        //     9000 size of image
-        // ```
-        assert!(stats.did_download_pe(&PeId::new("clrhost.dll", 0x7D1F_08C1, 0x9_000)));
+    #[test]
+    fn load_local_symbol() -> Result<()> {
+        let small_path = testdata("small.exe");
+        let small_pdb_path = small_path
+            .parent()
+            .unwrap()
+            .join("small.pdb")
+            .into_os_string()
+            .into_encoded_bytes();
 
-        assert_eq!(stats.pdb_download_count(), 1);
-        assert!(stats.did_download_pdb(&PdbId::new(
-            "clrhost.pdb",
-            "59E5C589F2149783C04A42F26DA1CC23".parse()?,
-            1
-        )?));
+        let cache = ReadCache::new(File::open(small_path)?);
+
+        let cb = move |_addr: u64, buf: &mut [u8]| -> Option<io::Result<usize>> {
+            // Make it seems like there is a local hit. A local hit is when the PDB path
+            // from the PE file resolves directly to an existing PDB file. To make this
+            // happen in the CI, we basically will man-in-the-middle the read requests into
+            // the debug directory and overwrite the read PDB path to make it a valid local
+            // path.
+            //
+            // If we don't find a '.pdb\0' into buf, then we're not reading what we're
+            // interested in.
+            if let Some(last_chunk) = buf.last_chunk::<5>()
+                && last_chunk != b".pdb\0"
+            {
+                return None;
+            }
+
+            // Figure out how much padding we need (account for the null byte read as well),
+            // and what character we'll padd with..
+            let padding = buf.len() - small_pdb_path.len() - 1;
+            let padding_byte = if cfg!(windows) { b'\\' } else { b'/' };
+
+            // ..and padd right after 'C:\'.
+            let mut small_pdb_path = small_pdb_path.clone();
+            for _ in 0..padding {
+                small_pdb_path.insert(2, padding_byte);
+            }
+
+            // Now, overwrite it w/ the path of where we extracted the pdb/testdata..
+            buf[..small_pdb_path.len()].copy_from_slice(&small_pdb_path);
+
+            Some(Ok(buf.len()))
+        };
+
+        let mut addr_space = OverrideDebugDirAddrSpace::new(&cache, Box::new(cb))?;
+        let len = addr_space.len();
+
+        let symcache = symcache("basics")?;
+        let mut symb = Symbolizer::new(
+            PdbLookupConfig::with_msft_symsrv(symcache.as_ref().to_path_buf())?,
+            vec![Module::new("small.exe", 0x0, len)],
+        );
+
+        let main_offset = symb
+            .name_to_addr(&mut addr_space, "small.exe!main")?
+            .unwrap();
+
+        let mut s = Vec::new();
+        symb.symbolize_full(&mut addr_space, main_offset, &mut s)?;
+        assert_eq!(
+            str::from_utf8(&s)?,
+            r"small.exe!main+0x0 [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 2]"
+        );
+
+        let stats = symb.stats();
+        assert_eq!(stats.pe_download_count(), 0);
+        assert_eq!(stats.pdb_download_count(), 0);
 
         Ok(())
     }
@@ -595,12 +672,12 @@ mod miri_incompatible_tests {
         );
         assert_eq!(
             str::from_utf8(&sym)?,
-            r"small.exe!main+0x0 [C:\Users\over\Downloads\small\small.c @ 2]".to_string()
+            r"small.exe!main+0x0 [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 2]".to_string()
         );
 
         // ```text
         // 0:000> u small!main+4 l1
-        // small!main+0x4 [C:\Users\over\Downloads\small\small.c @ 3]:
+        // small!main+0x4 [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 3]:
         // 00007ff6`94ab1060 488d0de9110000  lea     rcx,[small!`string' (00007ff6`94ab2250)]
         // ```
         sym.clear();
@@ -610,11 +687,11 @@ mod miri_incompatible_tests {
         );
         assert_eq!(
             str::from_utf8(&sym)?,
-            r"small.exe!main+0x4 [C:\Users\over\Downloads\small\small.c @ 3]".to_string()
+            r"small.exe!main+0x4 [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 3]".to_string()
         );
         // ```text
         // 0:000> u small!main+b l1
-        // small!main+0xb [C:\Users\over\Downloads\small\small.c @ 3]:
+        // small!main+0xb [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 3]:
         // 00007ff6`94ab1067 e89cffffff      call    small!printf (00007ff6`94ab1008)
         // ```
         sym.clear();
@@ -624,11 +701,11 @@ mod miri_incompatible_tests {
         );
         assert_eq!(
             str::from_utf8(&sym)?,
-            r"small.exe!main+0xb [C:\Users\over\Downloads\small\small.c @ 3]".to_string()
+            r"small.exe!main+0xb [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 3]".to_string()
         );
         // ```text
         // 0:000> u small!main+0x10
-        // small!main+0x10 [C:\Users\over\Downloads\small\small.c @ 4]:
+        // small!main+0x10 [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 4]:
         // 00007ff6`94ab106c 33c0            xor     eax,eax
         // ```
         sym.clear();
@@ -638,7 +715,7 @@ mod miri_incompatible_tests {
         );
         assert_eq!(
             str::from_utf8(&sym)?,
-            r"small.exe!main+0x10 [C:\Users\over\Downloads\small\small.c @ 4]".to_string()
+            r"small.exe!main+0x10 [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 4]".to_string()
         );
 
         let stats = symb.stats();

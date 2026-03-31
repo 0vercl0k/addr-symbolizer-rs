@@ -579,13 +579,12 @@ impl Pe {
         // ```
         //
         // See the issue?
-        // To avoid this, we break it down into components by hands. The
-        // resulting path might makes no sense on UNIX systems, but at least it is 'well
-        // formed' and the standard library can extract its filename and whatnot.
+        //
+        // To avoid this, we simply replace the '\\' by '/' as those seems to be handled
+        // on all platforms the same way. Technically this might break special paths
+        // like UNC path but we're not supporting those anyways, so...
         Ok(Some(PdbId::new(
-            String::from_utf8(file_name)?
-                .split('\\')
-                .collect::<PathBuf>(),
+            PathBuf::from(String::from_utf8(file_name)?.replace('\\', "/")),
             codeview.guid.into(),
             codeview.age,
         )?))
@@ -622,7 +621,8 @@ impl Pe {
         // name table. The pointers are 32 bits each and are relative to the image base.
         // The pointers are ordered lexically to allow binary searches.
         // An export name is defined only if the export name pointer table contains a
-        // pointer to it. """
+        // pointer to it.
+        // """
         let n_names = export_dir.number_of_names;
         let addr_of_names = export_dir.address_of_names;
         // """
