@@ -1,18 +1,20 @@
 // Axel '0vercl0k' Souchet - May 30 2024
 
-#[cfg(not(miri))]
+// #[cfg(not(miri))]
 mod miri_incompatible_tests {
     use std::env::temp_dir;
     use std::error::Error;
     use std::fs::{self, File};
     use std::io::{self, Read, Seek, Write};
+    use std::ops::Range;
     use std::path::{Path, PathBuf};
     use std::sync::LazyLock;
     use std::thread;
 
     use addr_symbolizer::{AddrSpace, Module, PdbId, PdbLookupConfig, PeId, Symbolizer};
-    use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile};
-    use object::{ReadCache, ReadRef, pe};
+    use object::pe::IMAGE_DIRECTORY_ENTRY_DEBUG;
+    use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile, PeFile64};
+    use object::{LittleEndian, ReadCache, ReadRef, pe};
     use zip::ZipArchive;
 
     type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -429,42 +431,71 @@ mod miri_incompatible_tests {
         Ok(())
     }
 
+    type OnDebugDirReadCallback = dyn Fn(u64, &mut [u8]) -> Option<io::Result<usize>>;
+    struct OverrideDebugDirAddrSpace {
+        file: File,
+        debug_dir: Range<u64>,
+        cb: Box<OnDebugDirReadCallback>,
+    }
+
+    impl OverrideDebugDirAddrSpace {
+        fn new(path: impl AsRef<Path>, cb: Box<OnDebugDirReadCallback>) -> Result<Self> {
+            let file = File::open(path.as_ref()).unwrap();
+            let cache = ReadCache::new(&file);
+            let pe = PeFile64::parse(&cache)?;
+            let dir = pe.data_directory(IMAGE_DIRECTORY_ENTRY_DEBUG).unwrap();
+            let debug_dir = dir.virtual_address.get(LittleEndian).into()
+                ..(dir.virtual_address.get(LittleEndian) + dir.size.get(LittleEndian)).into();
+
+            Ok(Self {
+                file,
+                debug_dir,
+                cb,
+            })
+        }
+
+        fn len(&self) -> Result<u64> {
+            Ok(self.file.metadata()?.len())
+        }
+    }
+
+    impl AddrSpace for OverrideDebugDirAddrSpace {
+        fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
+            // If we're trying to read from the debug directory, pass it to `cb`.
+            if self.debug_dir.contains(&addr)
+                && let Some(r) = (self.cb)(addr, buf)
+            {
+                return r;
+            }
+
+            self.file.seek(io::SeekFrom::Start(addr))?;
+
+            self.file.read(buf)
+        }
+    }
+
     #[test]
     fn download_pe() -> Result<()> {
-        struct FileAddrSpace(File);
-
-        impl FileAddrSpace {
-            fn new(path: impl AsRef<Path>) -> Self {
-                Self(File::open(path.as_ref()).unwrap())
+        let cb = |addr: u64, _buf: &mut [u8]| -> Option<io::Result<usize>> {
+            // Make it look like there isn't a debug directory to force the library to not
+            // be able to read the associated PDB identifier. It'll have to go and download
+            // the PE first.
+            //
+            // ```text
+            // 0:000> !dh clrhost
+            // ...
+            //     35D0 [      70] address [size] of Debug Directory
+            // ```
+            if (0x35D0..(0x35D0 + 0x70)).contains(&addr) {
+                // Make it look like we couldn't read any bytes from this section.
+                Some(Ok(0))
+            } else {
+                // Let it read from the underlying file.
+                None
             }
-
-            fn len(&self) -> Result<u64> {
-                Ok(self.0.metadata()?.len())
-            }
-        }
-
-        impl AddrSpace for FileAddrSpace {
-            fn read_at(&mut self, addr: u64, buf: &mut [u8]) -> io::Result<usize> {
-                // Make it look like there isn't a debug directory to force the library to not
-                // be able to read the associated PDB identifier. It'll have to go and download
-                // the PE first.
-                // ```text
-                // 0:000> !dh clrhost
-                // ...
-                //     35D0 [      70] address [size] of Debug Directory
-                // ```
-                if (0x35D0..(0x35D0 + 0x70)).contains(&addr) {
-                    return Ok(0);
-                }
-
-                self.0.seek(io::SeekFrom::Start(addr))?;
-
-                self.0.read(buf)
-            }
-        }
-
-        let mut file_addr_space = FileAddrSpace::new(testdata("clrhost.dll"));
-        let len = file_addr_space.len()?;
+        };
+        let mut addr_space = OverrideDebugDirAddrSpace::new(testdata("clrhost.dll"), Box::new(cb))?;
+        let len = addr_space.len()?;
 
         let symcache = symcache("basics")?;
         let mut symb = Symbolizer::new(
@@ -473,11 +504,36 @@ mod miri_incompatible_tests {
         );
 
         assert!(
-            symb.name_to_addr(&mut file_addr_space, "noname.dll!unknown1337")?
+            symb.name_to_addr(&mut addr_space, "noname.dll!unknown1337")?
                 .is_none()
         );
 
-        symb.symbolize_full(&mut file_addr_space, 0, &mut Vec::new())?;
+        symb.symbolize_full(&mut addr_space, 0, &mut Vec::new())?;
+
+        let stats = symb.stats();
+        assert_eq!(stats.pe_download_count(), 1);
+        // This is the PE we should have downloaded:
+        //
+        // ```text
+        // File Type: DLL
+        // FILE HEADER VALUES
+        //     8664 machine (X64)
+        //        6 number of sections
+        // 7D1F08C1 time date stamp Tue Jul  8 20:10:57 2036
+        // ...
+        //     9000 size of image
+        // ```
+        assert!(stats.did_download_pe(&PeId::new("clrhost.dll", 0x7D1F_08C1, 0x9_000)));
+
+        assert_eq!(stats.pdb_download_count(), 1);
+        assert!(stats.did_download_pdb(&PdbId::new(
+            "clrhost.pdb",
+            "59E5C589F2149783C04A42F26DA1CC23".parse()?,
+            1
+        )?));
+
+        Ok(())
+    }
 
         let stats = symb.stats();
         assert_eq!(stats.pe_download_count(), 1);
