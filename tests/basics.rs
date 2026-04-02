@@ -597,11 +597,18 @@ mod miri_incompatible_tests {
             // and what character we'll padd with..
             let padding = buf.len() - small_pdb_path.len() - 1;
             let padding_byte = if cfg!(windows) { b'\\' } else { b'/' };
+            let padding_offset = if cfg!(windows) {
+                // Pad right after the 'c:\'
+                2
+            } else {
+                // Pad right after the '/'
+                1
+            };
 
-            // ..and padd right after 'C:\'.
+            // ..and pad it.
             let mut small_pdb_path = small_pdb_path.clone();
             for _ in 0..padding {
-                small_pdb_path.insert(2, padding_byte);
+                small_pdb_path.insert(padding_offset, padding_byte);
             }
 
             // Now, overwrite it w/ the path of where we extracted the pdb/testdata..
