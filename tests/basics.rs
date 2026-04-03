@@ -54,13 +54,8 @@ mod miri_incompatible_tests {
                 assert!(res.is_err());
             }
 
-            let mut full = Vec::new();
-            symb.symbolize_full(addr_space, self.offset, &mut full)?;
-            assert_eq!(str::from_utf8(&full)?, self.full);
-
-            let mut modoff = Vec::new();
-            symb.symbolize_modoff(self.offset, &mut modoff)?;
-            assert_eq!(str::from_utf8(&modoff)?, self.modoff);
+            assert_eq!(symb.symbolize_full(addr_space, self.offset)?, self.full);
+            assert_eq!(symb.symbolize_modoff(self.offset)?, self.modoff);
 
             Ok(())
         }
@@ -286,9 +281,7 @@ mod miri_incompatible_tests {
         );
 
         for expected in EXPECTED_RAW {
-            let mut modoff = Vec::new();
-            symb.symbolize_modoff(expected.offset, &mut modoff)?;
-            assert_eq!(str::from_utf8(&modoff)?, expected.modoff);
+            assert_eq!(symb.symbolize_modoff(expected.offset)?, expected.modoff);
         }
 
         assert_eq!(
@@ -297,18 +290,20 @@ mod miri_incompatible_tests {
             EXPORTED_FUNCTION.offset
         );
 
-        let mut full = Vec::new();
-        symb.symbolize_full(&mut raw_addr_space, EXPORTED_FUNCTION.offset, &mut full)?;
-        assert_eq!(str::from_utf8(&full)?, EXPORTED_FUNCTION.full);
+        assert_eq!(
+            symb.symbolize_full(&mut raw_addr_space, EXPORTED_FUNCTION.offset)?,
+            EXPORTED_FUNCTION.full
+        );
 
         assert!(
             symb.name_to_addr(&mut raw_addr_space, PRIVATE_FUNCTION.full)?
                 .is_none(),
         );
 
-        let mut full = Vec::new();
-        symb.symbolize_full(&mut raw_addr_space, PRIVATE_FUNCTION.offset, &mut full)?;
-        assert_ne!(str::from_utf8(&full)?, PRIVATE_FUNCTION.full);
+        assert_ne!(
+            symb.symbolize_full(&mut raw_addr_space, PRIVATE_FUNCTION.offset)?,
+            PRIVATE_FUNCTION.full
+        );
 
         let stats = symb.stats();
         assert_eq!(stats.amount_downloaded(), 0);
@@ -539,7 +534,7 @@ mod miri_incompatible_tests {
                 .is_none()
         );
 
-        symb.symbolize_full(&mut addr_space, 0, &mut Vec::new())?;
+        symb.symbolize_full(&mut addr_space, 0)?;
 
         let stats = symb.stats();
         assert_eq!(stats.pe_download_count(), 1);
@@ -630,10 +625,8 @@ mod miri_incompatible_tests {
             .name_to_addr(&mut addr_space, "small.exe!main")?
             .unwrap();
 
-        let mut s = Vec::new();
-        symb.symbolize_full(&mut addr_space, main_offset, &mut s)?;
         assert_eq!(
-            str::from_utf8(&s)?,
+            symb.symbolize_full(&mut addr_space, main_offset)?,
             r"small.exe!main+0x0 [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 2]"
         );
 
@@ -672,13 +665,8 @@ mod miri_incompatible_tests {
             Some(MAIN_OFFSET)
         );
 
-        let mut sym = Vec::new();
-        assert!(
-            symb.symbolize_full(&mut file_addr_space, MAIN_OFFSET, &mut sym)
-                .is_ok()
-        );
         assert_eq!(
-            str::from_utf8(&sym)?,
+            symb.symbolize_full(&mut file_addr_space, MAIN_OFFSET)?,
             r"small.exe!main+0x0 [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 2]".to_string()
         );
 
@@ -687,13 +675,8 @@ mod miri_incompatible_tests {
         // small!main+0x4 [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 3]:
         // 00007ff6`94ab1060 488d0de9110000  lea     rcx,[small!`string' (00007ff6`94ab2250)]
         // ```
-        sym.clear();
-        assert!(
-            symb.symbolize_full(&mut file_addr_space, MAIN_OFFSET + 4, &mut sym)
-                .is_ok()
-        );
         assert_eq!(
-            str::from_utf8(&sym)?,
+            symb.symbolize_full(&mut file_addr_space, MAIN_OFFSET + 4)?,
             r"small.exe!main+0x4 [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 3]".to_string()
         );
         // ```text
@@ -701,13 +684,8 @@ mod miri_incompatible_tests {
         // small!main+0xb [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 3]:
         // 00007ff6`94ab1067 e89cffffff      call    small!printf (00007ff6`94ab1008)
         // ```
-        sym.clear();
-        assert!(
-            symb.symbolize_full(&mut file_addr_space, MAIN_OFFSET + 0xb, &mut sym)
-                .is_ok()
-        );
         assert_eq!(
-            str::from_utf8(&sym)?,
+            symb.symbolize_full(&mut file_addr_space, MAIN_OFFSET + 0xb)?,
             r"small.exe!main+0xb [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 3]".to_string()
         );
         // ```text
@@ -715,13 +693,8 @@ mod miri_incompatible_tests {
         // small!main+0x10 [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 4]:
         // 00007ff6`94ab106c 33c0            xor     eax,eax
         // ```
-        sym.clear();
-        assert!(
-            symb.symbolize_full(&mut file_addr_space, MAIN_OFFSET + 0x10, &mut sym)
-                .is_ok()
-        );
         assert_eq!(
-            str::from_utf8(&sym)?,
+            symb.symbolize_full(&mut file_addr_space, MAIN_OFFSET + 0x10)?,
             r"small.exe!main+0x10 [C:\Users\over\Downloads\a_very_long_path_to_make_space_in_the_debug_directory_to_have_enough_room_for_tests\small\small.c @ 4]".to_string()
         );
 

@@ -86,9 +86,7 @@ fn user(dmp: &UserDumpParser, addr: u64) -> Result<()> {
         modules,
     );
 
-    let mut s = Vec::new();
-    symb.symbolize_full(&mut wrapper, addr, &mut s)?;
-    println!("{addr:#x}: {}", String::from_utf8(s)?);
+    println!("{addr:#x}: {}", symb.symbolize_full(&mut wrapper, addr)?);
 
     Ok(())
 }
@@ -120,9 +118,7 @@ fn kernel(dmp: &KernelDumpParser, addr: u64) -> Result<()> {
         modules,
     );
 
-    let mut s = Vec::new();
-    symb.symbolize_full(&mut wrapper, addr, &mut s)?;
-    println!("{addr:#x}: {}", String::from_utf8(s)?);
+    println!("{addr:#x}: {}", symb.symbolize_full(&mut wrapper, addr)?);
 
     Ok(())
 }

@@ -524,9 +524,25 @@ impl Symbolizer {
         })
     }
 
+    /// Symbolize `addr` in the `module+offset` style.
+    pub fn symbolize_modoff(&mut self, addr: u64) -> Result<String> {
+        let mut modoff = Vec::new();
+        self.symbolize_modoff_into(addr, &mut modoff)?;
+
+        Ok(String::from_utf8(modoff)?)
+    }
+
+    /// Symbolize `addr` in the `module!function+offset` style.
+    pub fn symbolize_full(&mut self, addr_space: &mut impl AddrSpace, addr: u64) -> Result<String> {
+        let mut full = Vec::new();
+        self.symbolize_full_into(addr_space, addr, &mut full)?;
+
+        Ok(String::from_utf8(full)?)
+    }
+
     /// Symbolize `addr` in the `module+offset` style and write the result into
     /// `output`.
-    pub fn symbolize_modoff(&mut self, addr: u64, output: &mut impl Write) -> Result<()> {
+    pub fn symbolize_modoff_into(&mut self, addr: u64, output: &mut impl Write) -> Result<()> {
         let mut buffer = [0; 16];
         if let Some(module) = self.modules.by_addr(addr) {
             output.write_all(module.name.as_bytes())?;
@@ -550,7 +566,7 @@ impl Symbolizer {
 
     /// Symbolize `addr` in the `module!function+offset` style and write the
     /// result into `output`.
-    pub fn symbolize_full(
+    pub fn symbolize_full_into(
         &mut self,
         addr_space: &mut impl AddrSpace,
         addr: u64,
@@ -566,7 +582,7 @@ impl Symbolizer {
 
                 Ok(())
             }
-            None => self.symbolize_modoff(addr, output),
+            None => self.symbolize_modoff_into(addr, output),
         }
     }
 
