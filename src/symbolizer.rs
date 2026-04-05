@@ -479,6 +479,24 @@ impl Symbolizer {
         }
     }
 
+    pub fn with_cache_capacity(
+        pdb_lookup: PdbLookupConfig,
+        modules: impl IntoIterator<Item = Module>,
+        cache_capacity_hint: usize,
+    ) -> Self {
+        let modules = modules.into_iter().collect();
+        let addr_cache =
+            HashMap::with_capacity_and_hasher(cache_capacity_hint, IdentityHasher::default());
+
+        Self {
+            stats: Stats::default(),
+            modules: Modules::new(modules),
+            pdb_lookup,
+            addr_cache,
+            pdbcache_store: PdbCacheStore::default(),
+        }
+    }
+
     /// Get [`Stats`].
     #[must_use]
     pub fn stats(&self) -> &Stats {
