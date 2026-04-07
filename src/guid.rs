@@ -52,7 +52,8 @@ impl From<[u8; 16]> for Guid {
 
 impl Display for Guid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!(
+        write!(
+            f,
             "{:08X}{:04X}{:04X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
             self.d0,
             self.d1,
@@ -65,7 +66,7 @@ impl Display for Guid {
             self.d3[5],
             self.d3[6],
             self.d3[7]
-        ))
+        )
     }
 }
 

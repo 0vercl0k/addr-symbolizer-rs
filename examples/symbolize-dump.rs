@@ -4,7 +4,7 @@ use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use addr_symbolizer::{AddrSpace, Builder, Module};
+use addr_symbolizer::{AddrSpace, Module, PdbLookupConfig, Symbolizer};
 use anyhow::Result;
 use clap::Parser;
 use kdmp_parser::parse::KernelDumpParser;
@@ -81,15 +81,12 @@ fn user(dmp: &UserDumpParser, addr: u64) -> Result<()> {
         .collect::<Vec<_>>();
 
     let mut wrapper = UserDumpAddrSpace(dmp);
-    let mut symb = Builder::default()
-        .modules(modules)
-        .msft_symsrv()
-        .symcache(sympath().expect("define a _NT_SYMBOL_PATH"))?
-        .build()?;
+    let mut symb = Symbolizer::new(
+        PdbLookupConfig::with_msft_symsrv(sympath().expect("define a _NT_SYMBOL_PATH"))?,
+        modules,
+    );
 
-    let mut s = Vec::new();
-    symb.full(&mut wrapper, addr, &mut s)?;
-    println!("{addr:#x}: {}", String::from_utf8(s)?);
+    println!("{addr:#x}: {}", symb.symbolize_full(&mut wrapper, addr)?);
 
     Ok(())
 }
@@ -116,15 +113,12 @@ fn kernel(dmp: &KernelDumpParser, addr: u64) -> Result<()> {
     }
 
     let mut wrapper = KernelDumpAdrSpace(dmp);
-    let mut symb = Builder::default()
-        .modules(modules)
-        .msft_symsrv()
-        .symcache(sympath().expect("define a _NT_SYMBOL_PATH"))?
-        .build()?;
+    let mut symb = Symbolizer::new(
+        PdbLookupConfig::with_msft_symsrv(sympath().expect("define a _NT_SYMBOL_PATH"))?,
+        modules,
+    );
 
-    let mut s = Vec::new();
-    symb.full(&mut wrapper, addr, &mut s)?;
-    println!("{addr:#x}: {}", String::from_utf8(s)?);
+    println!("{addr:#x}: {}", symb.symbolize_full(&mut wrapper, addr)?);
 
     Ok(())
 }

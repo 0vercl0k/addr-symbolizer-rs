@@ -2,14 +2,16 @@
 //! This module contains the implementation of a bunch of misc utility functions
 //! that didn't really fit anywhere else.
 
+use std::mem::transmute;
+
 /// A relative address.
-pub type Rva = u32;
+pub(crate) type Rva = u32;
 
 /// Convert an `u64` into an hex string.
 ///
 /// Highly inspired by 'Fast unsigned integer to hex string' by Johnny Lee:
 ///   - <https://johnnylee-sde.github.io/Fast-unsigned-integer-to-hex-string/>
-pub fn fast_hex64(buffer: &mut [u8; 16], u: u64) -> &[u8] {
+pub(crate) fn fast_hex64(buffer: &mut [u8; 16], u: u64) -> &[u8] {
     let mut x = u128::from(u);
 
     // Arrange each digit into their own byte. Each byte will become the ascii
@@ -74,7 +76,7 @@ pub fn fast_hex64(buffer: &mut [u8; 16], u: u64) -> &[u8] {
 ///
 /// Adapted to not bother shuffling the bytes in little endian; we simply read
 /// the final integer as big endian.
-pub fn fast_hex32(buffer: &mut [u8; 8], u: u32) -> &[u8] {
+pub(crate) fn fast_hex32(buffer: &mut [u8; 8], u: u32) -> &[u8] {
     let mut x = u64::from(u);
 
     // Here's a step by step using `0xDEADBEEF`:
@@ -94,9 +96,50 @@ pub fn fast_hex32(buffer: &mut [u8; 8], u: u32) -> &[u8] {
     buffer
 }
 
+#[derive(Debug, PartialEq)]
+pub(crate) struct ParsedFullSymbolName<'s> {
+    pub module_name: &'s str,
+    pub function_name: &'s str,
+    pub offset: u64,
+}
+
+/// Parse `mod!func+0xoffset`.
+pub(crate) fn parse_full_name(full: &str) -> Option<ParsedFullSymbolName<'_>> {
+    let (module_name, rest) = full.split_once('!')?;
+    if rest.contains('!') {
+        return None;
+    }
+
+    let (function_name, offset) = match rest.split_once('+') {
+        Some((function_name, offset)) => {
+            if !offset.starts_with("0x") {
+                return None;
+            }
+
+            (
+                function_name,
+                u64::from_str_radix(offset.trim_start_matches("0x"), 16).ok()?,
+            )
+        }
+        None => (rest, 0),
+    };
+
+    Some(ParsedFullSymbolName {
+        module_name,
+        function_name,
+        offset,
+    })
+}
+
+/// Extend the lifetime of a string slice to static; be VERY careful with this.
+pub(crate) unsafe fn elyxir_of_life<'s>(s: &'s str) -> &'static str {
+    unsafe { transmute::<&'s str, &'static str>(s) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{fast_hex32, fast_hex64};
+    use crate::misc::{ParsedFullSymbolName, parse_full_name};
 
     #[test]
     fn hex32() {
@@ -118,5 +161,39 @@ mod tests {
         assert_eq!(out, b"00000000deadbeef");
         let out = fast_hex64(&mut buffer, 0x0);
         assert_eq!(out, b"0000000000000000");
+    }
+
+    #[test]
+    fn parse() {
+        assert_eq!(
+            parse_full_name("yo.dll!func").unwrap(),
+            ParsedFullSymbolName {
+                module_name: "yo.dll",
+                function_name: "func",
+                offset: 0
+            }
+        );
+
+        assert_eq!(
+            parse_full_name("yo!func+0x1337").unwrap(),
+            ParsedFullSymbolName {
+                module_name: "yo",
+                function_name: "func",
+                offset: 0x1337
+            }
+        );
+
+        assert!(parse_full_name("yo!!func").is_none());
+        assert!(parse_full_name("yo!func+1337").is_none());
+
+        assert_eq!(
+            parse_full_name("foo.dll!Microsoft::WRL::Details::ModuleBase::GetMidEntryPointer+0x0")
+                .unwrap(),
+            ParsedFullSymbolName {
+                module_name: "foo.dll",
+                function_name: "Microsoft::WRL::Details::ModuleBase::GetMidEntryPointer",
+                offset: 0
+            }
+        );
     }
 }

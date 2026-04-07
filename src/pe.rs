@@ -17,7 +17,7 @@ use crate::{Error, Error as E, Result};
 #[expect(clippy::struct_field_names)]
 #[derive(Default, Debug, Clone, Copy)]
 #[repr(C, packed(2))]
-pub struct ImageDosHeader {
+pub(crate) struct ImageDosHeader {
     pub e_magic: u16,
     pub e_cblp: u16,
     pub e_cp: u16,
@@ -50,7 +50,7 @@ struct NtHeaders {
 /// The `IMAGE_FILE_HEADER`.
 #[derive(Default, Debug, Clone, Copy)]
 #[repr(C)]
-pub struct ImageFileHeader {
+pub(crate) struct ImageFileHeader {
     pub machine: u16,
     pub number_of_sections: u16,
     pub time_date_stamp: u32,
@@ -63,12 +63,12 @@ pub struct ImageFileHeader {
 /// The `IMAGE_DATA_DIRECTORY`.
 #[derive(Debug, Default, Clone, Copy)]
 #[repr(C)]
-pub struct ImageDataDirectory {
+pub(crate) struct ImageDataDirectory {
     pub virtual_address: u32,
     pub size: u32,
 }
 
-trait ImageOptionalHeader {
+trait ImageOptionalHeader: Copy {
     fn debug_dir(&self) -> ImageDataDirectory;
     fn export_dir(&self) -> ImageDataDirectory;
     fn size_of_image(&self) -> u32;
@@ -77,7 +77,7 @@ trait ImageOptionalHeader {
 /// The `IMAGE_OPTIONAL_HEADER32`.
 #[derive(Debug, Default, Clone, Copy)]
 #[repr(C)]
-pub struct ImageOptionalHeader32 {
+pub(crate) struct ImageOptionalHeader32 {
     pub magic: u16,
     pub major_linker_version: u8,
     pub minor_linker_version: u8,
@@ -128,7 +128,7 @@ impl ImageOptionalHeader for ImageOptionalHeader32 {
 /// The `IMAGE_OPTIONAL_HEADER64`.
 #[derive(Debug, Default, Clone, Copy)]
 #[repr(C, packed(4))]
-pub struct ImageOptionalHeader64 {
+pub(crate) struct ImageOptionalHeader64 {
     pub magic: u16,
     pub major_linker_version: u8,
     pub minor_linker_version: u8,
@@ -178,7 +178,7 @@ impl ImageOptionalHeader for ImageOptionalHeader64 {
 /// The `IMAGE_DEBUG_DIRECTORY`.
 #[derive(Default, Debug, Clone, Copy)]
 #[repr(C)]
-pub struct ImageDebugDirectory {
+pub(crate) struct ImageDebugDirectory {
     pub characteristics: u32,
     pub time_date_stamp: u32,
     pub major_version: u16,
@@ -192,7 +192,7 @@ pub struct ImageDebugDirectory {
 /// The `IMAGE_EXPORT_DIRECTORY`.
 #[derive(Default, Debug, Clone, Copy)]
 #[repr(C)]
-pub struct ImageExportDirectory {
+pub(crate) struct ImageExportDirectory {
     pub characteristics: u32,
     pub time_date_stamp: u32,
     pub major_version: u16,
@@ -209,7 +209,7 @@ pub struct ImageExportDirectory {
 /// The code view information.
 #[derive(Debug, Default, Clone, Copy)]
 #[repr(C)]
-pub struct Codeview {
+pub(crate) struct Codeview {
     pub signature: u32,
     pub guid: [u8; 16],
     pub age: u32,
@@ -256,7 +256,7 @@ impl SymcacheEntry for PdbId {
 
 impl Display for PdbId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("{}:{}:{:x}", self.name, self.guid, self.age))
+        write!(f, "{}:{}:{:x}", self.name, self.guid, self.age)
     }
 }
 
@@ -312,10 +312,7 @@ impl PeId {
 
 impl Display for PeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!(
-            "{:?}:{:#x}:{:#x}",
-            self.name, self.timestamp, self.size
-        ))
+        write!(f, "{:?}:{:#x}:{:#x}", self.name, self.timestamp, self.size)
     }
 }
 
@@ -385,7 +382,7 @@ fn try_read_struct_at<S: Copy>(
         .map(|()| unsafe { t.assume_init() }))
 }
 
-fn read_optional_headers<O: ImageOptionalHeader + Copy>(
+fn read_optional_headers<O: ImageOptionalHeader>(
     addr_space: &mut impl AddrSpace,
     opt_hdr_addr: u64,
     opt_hdr_size: usize,
@@ -409,7 +406,7 @@ fn read_optional_headers<O: ImageOptionalHeader + Copy>(
 ///
 /// We are only interested in the PDB identifier and the Export Address Table.
 #[derive(Debug, Default)]
-pub struct Pe {
+pub(crate) struct Pe {
     base: u64,
     pub timestamp: u32,
     pub size: u32,
@@ -556,8 +553,38 @@ impl Pe {
         // All right, at this point we have everything we need: the PDB name / GUID /
         // age. Those are the three piece of information we need to download a PDB
         // off Microsoft's symbol server.
+        //
+        // But one more thing. The path we just read is a Windows path (eg
+        // `c:\small.pdb`). Because we support UNIX platforms, we need to be
+        // careful with it. Instead of a many words here's a simple piece of
+        // code:
+        //
+        // ```rust
+        // fn main() {
+        //     let path: &std::path::Path = std::path::Path::new(r"C:\small.pdb");
+        //     println!("{path:?}, {:?}", path.file_name());
+        // }
+        // ```
+        //
+        // and here is the result running it on Linux..:
+        //
+        // ```text
+        // "C:\\small.pdb", Some("C:\\small.pdb")
+        // ```
+        //
+        // ..and on Windows:
+        //
+        // ```text
+        // "C:\\small.pdb", Some("small.pdb")
+        // ```
+        //
+        // See the issue?
+        //
+        // To avoid this, we simply replace the '\\' by '/' as those seems to be handled
+        // on all platforms the same way. Technically this might break special paths
+        // like UNC path but we're not supporting those anyways, so...
         Ok(Some(PdbId::new(
-            String::from_utf8(file_name)?,
+            PathBuf::from(String::from_utf8(file_name)?.replace('\\', "/")),
             codeview.guid.into(),
             codeview.age,
         )?))
@@ -570,7 +597,7 @@ impl Pe {
         // Let's check if there's an EAT.
         debug!("parsing EAT..");
         if usize::try_from(self.export_data_dir.size).unwrap() < size_of::<ImageDebugDirectory>() {
-            debug!("debug dir is too small");
+            debug!("export dir is too small");
             return Ok(None);
         }
 
@@ -594,7 +621,8 @@ impl Pe {
         // name table. The pointers are 32 bits each and are relative to the image base.
         // The pointers are ordered lexically to allow binary searches.
         // An export name is defined only if the export name pointer table contains a
-        // pointer to it. """
+        // pointer to it.
+        // """
         let n_names = export_dir.number_of_names;
         let addr_of_names = export_dir.address_of_names;
         // """
@@ -699,7 +727,7 @@ impl Pe {
 
             let forwarder = eat_range.contains(&addr_rva);
             if !forwarder {
-                exports.push((addr_rva, name.clone()));
+                exports.push((addr_rva, name));
             }
         }
 
