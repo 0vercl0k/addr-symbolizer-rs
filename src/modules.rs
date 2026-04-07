@@ -101,10 +101,8 @@ mod tests {
         assert!(modules.by_addr(1).is_none());
         assert_eq!(modules.by_addr(0x1_000).unwrap().name, "foo");
         assert_eq!(modules.by_name("foo").unwrap().at.start, 0x1_000);
-        // assert_eq!(modules.by_name("Foo").unwrap().at.start, 0x1_000);
         assert_eq!(modules.by_addr(0x2_000).unwrap().name, "foobar");
         assert_eq!(modules.by_name("foobar").unwrap().at.start, 0x2_000);
-        // assert_eq!(modules.by_name("Foobar").unwrap().at.start, 0x2_000);
         assert!(modules.by_addr(0x3_000).is_none());
         assert!(modules.by_name("bleh").is_none());
         assert_eq!(modules.by_addr(0x4_fff).unwrap().name, "bar");
