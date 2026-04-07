@@ -458,7 +458,7 @@ pub struct Symbolizer {
     pdb_lookup: PdbLookupConfig,
     /// Caches addresses to symbols. This allows us to not have to symbolize an
     /// address again.
-    addr_cache: HashMap<u64, String, IdentityHasher>,
+    addr_cache: HashMap<u64, Box<str>, IdentityHasher>,
     /// Each parsed module is stored in this cache. We parse PDBs, etc. only
     /// once and then the [`PdbCache`] is used to query.
     pdbcache_store: PdbCacheStore,
@@ -537,7 +537,7 @@ impl Symbolizer {
                     return Ok(None);
                 };
 
-                Some(v.insert(symbol))
+                Some(v.insert(symbol.into_boxed_str()))
             }
         })
     }
