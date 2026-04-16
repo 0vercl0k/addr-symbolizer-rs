@@ -626,7 +626,7 @@ impl Symbolizer {
 
         Ok(pdbcache
             .addr_by_name(parsed_name.function_name)
-            .map(|base_addr| u64::from(base_addr).strict_add(parsed_name.offset)))
+            .and_then(|base_addr| u64::from(base_addr).checked_add(parsed_name.offset)))
     }
 
     /// Imports PDBs from other directory into the symcache that is used by this
