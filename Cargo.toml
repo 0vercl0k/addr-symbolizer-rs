@@ -15,7 +15,7 @@ edition = "2024"
 pdb2 = "0.10"
 log = "0.4"
 msvc-demangler = "0.11"
-ureq = { version = "3.1", default-features = false, features = ["rustls", "gzip"] }
+ureq = { version = "3.3", default-features = false, features = ["rustls", "gzip"] }
 thiserror = "2.0"
 
 [dev-dependencies]
@@ -27,10 +27,10 @@ object = { version = "0.39", default-features = false, features = [
     "pe",
     "std",
 ] }
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 env_logger = { version = "0.11" }
 anyhow = "1.0"
-zip = "8.4"
+zip = "8.6"
 
 [lints.clippy]
 pedantic = "warn"
