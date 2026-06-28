@@ -584,7 +584,7 @@ impl<'module> PdbCacheBuilder<'module> {
         while let Some(module) = module_it.next()? {
             // Get information about the module; such as its path, its symbols, etc.
             let Some(info) = pdb.module_info(&module)? else {
-                warn!("no module info: {:?}", &module);
+                warn!("no module info: {module:?}");
                 continue;
             };
 

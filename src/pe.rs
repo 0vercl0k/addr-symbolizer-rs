@@ -540,13 +540,12 @@ impl Pe {
             return Ok(None);
         }
 
-        // The last character is supposed to be a NULL byte, bail if it's not there.
-        let null_byte_idx = amount - 1;
-        if *file_name.get(null_byte_idx).unwrap() != 0 {
+        // Find where the NULL byte is at.
+        let Some(null_byte_idx) = file_name.iter().position(|c| *c == 0) else {
             return Err(Error::Other(
                 "the module path doesn't end with a NULL byte".to_string(),
             ));
-        }
+        };
 
         file_name.resize(null_byte_idx, 0);
 
